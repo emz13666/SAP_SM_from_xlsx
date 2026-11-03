@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.33
+// @version      1.36
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
@@ -120,7 +120,8 @@
     modularSystems: ['Modular', 'КОБУС', 'Серверное оборудование', 'Серверное программное обеспечение'],
     status: { inProgress: 'E0002', solution: 'E0005' },
     fixed: { author: 'Общий ЛГОК', handler: 'Евгений Михайлович Зиновьев' },
-    lsKey: 'sap_sm_xlsx_last_row',
+    // v1.36: JSON { fileName, lastExcelRow }
+    lsKey: 'sap_sm_xlsx_state',
     textAddTimeoutMs: 60000
   };
 
@@ -159,6 +160,7 @@
       <div class="row">
         <input type="file" id="sm-file" accept=".xlsx,.xls"/>
         <div id="sm-fileName" style="margin-top:3px;color:#555;">Текущий файл: —</div>
+        <div id="sm-savedInfo" style="margin-top:2px;color:#888;font-size:11px;"></div>
       </div>
       <div class="row">
         <label><span id="sm-startRowLabel">Начать со строки:</span>
@@ -184,7 +186,7 @@
 
   const $ = (s) => panel.querySelector(s);
   const ui = {
-    file: $('#sm-file'), fileName: $('#sm-fileName'),
+    file: $('#sm-file'), fileName: $('#sm-fileName'), savedInfo: $('#sm-savedInfo'),
     startRow: $('#sm-startRow'), startRowLabel: $('#sm-startRowLabel'),
     step: $('#sm-step'), debugActions: $('#sm-debugActions'), verboseLog: $('#sm-verboseLog'),
     start: $('#sm-start'), pause: $('#sm-pause'), cont: $('#sm-continue'), stop: $('#sm-stop'),
@@ -686,25 +688,56 @@
   const state = {
     rows: [], idx: 0, running: false, paused: false, stopped: false,
     stats: { ok: 0, warn: 0, err: 0 },
-    // v1.33: кэш для перечитывания без повторного выбора файла
     fileBuffer: null,
-    fileName: '',
-    parsedFrom: null,          // с какой Excel-строки загружены state.rows
-    lastFilledExcelRow: null,  // последняя заполненная строка в файле
-    totalFilled: 0             // всего заполненных строк в файле
+    fileName: null,          // v1.36: отпечаток файла = только имя
+    parsedFrom: null,
+    lastFilledExcelRow: null,
+    totalFilled: 0
   };
 
+  // ==================== ФАЙЛ: ИМЯ + LOCALSTORAGE ====================
+  // v1.36: идентификатор файла = только имя (без size/lastModified).
+  function loadSavedState() {
+    try {
+      const raw = localStorage.getItem(CFG.lsKey);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return null;
+      if (!obj.fileName) return null;
+      return obj;
+    } catch (e) { return null; }
+  }
+
+  function saveState(fileName, lastExcelRow) {
+    if (!fileName) return;
+    try {
+      localStorage.setItem(CFG.lsKey, JSON.stringify({
+        fileName: fileName,
+        lastExcelRow: lastExcelRow
+      }));
+    } catch (e) {}
+  }
+
+  function refreshSavedInfo(fileName) {
+    const saved = loadSavedState();
+    if (!saved) {
+      ui.savedInfo.textContent = '';
+      return;
+    }
+    if (fileName && saved.fileName === fileName) {
+      ui.savedInfo.textContent = `В LocalStorage: этот файл, последняя успешная строка Excel#${saved.lastExcelRow}.`;
+    } else {
+      ui.savedInfo.textContent = `В LocalStorage: другой файл (${saved.fileName}), строка Excel#${saved.lastExcelRow}. Подсказка не применится.`;
+    }
+  }
+
   // ==================== ЧТЕНИЕ XLSX ====================
-  // Читаем ТОЛЬКО лист CFG.sheetName. Возвращаем:
-  //   allRows:     [{excelRowNum, cells}, ...] — все заполненные строки (без заголовка)
-  //   totalFilled: количество заполненных строк
-  //   lastFilled:  Excel-номер последней заполненной строки
   function parseXlsxBuffer(buffer) {
     const wb = XLSX.read(new Uint8Array(buffer), {
       type: 'array',
       cellDates: true,
       dense: true,
-      sheets: CFG.sheetName   // v1.33: читаем только нужный лист
+      sheets: CFG.sheetName
     });
     const ws = wb.Sheets[CFG.sheetName];
     if (!ws) throw new Error(`Лист "${CFG.sheetName}" не найден`);
@@ -712,7 +745,6 @@
     if (!ref) return { allRows: [], totalFilled: 0, lastFilled: 0 };
     const range = XLSX.utils.decode_range(ref);
 
-    // blankrows:true — сохраняем индексацию, чтобы excelRowNum был реальным
     const aoa = XLSX.utils.sheet_to_json(ws, {
       header: 1, defval: '', raw: false, blankrows: true
     });
@@ -720,7 +752,7 @@
     const allRows = [];
     for (let i = 0; i < aoa.length; i++) {
       const excelRowNum = range.s.r + i + 1;
-      if (excelRowNum === 1) continue; // заголовок
+      if (excelRowNum === 1) continue;
       const r = aoa[i];
       let hasData = false;
       for (let c = 0; c <= CFG.col.K_exec; c++) {
@@ -734,12 +766,11 @@
     return { allRows, totalFilled, lastFilled };
   }
 
-  // Отфильтровать allRows по стартовой Excel-строке
   function filterRowsFrom(allRows, fromExcelRow) {
     const from = Math.max(1, parseInt(fromExcelRow, 10) || 1);
     return from > 1
       ? allRows.filter(x => x.excelRowNum >= from)
-      : allRows.slice(); // копия, чтобы не мутировать исходный массив
+      : allRows.slice();
   }
 
   // ==================== ВЫБОР ФАЙЛА ====================
@@ -757,7 +788,6 @@
     }
 
     ui.fileName.textContent = 'Текущий файл: ' + f.name;
-    state.fileName = f.name;
 
     try {
       state.fileBuffer = await f.arrayBuffer();
@@ -776,6 +806,24 @@
       return;
     }
 
+    // v1.36: идентификатор — только имя файла
+    const oldName = state.fileName;
+    const newName = f.name;
+    const fileChanged = oldName !== newName;
+    state.fileName = newName;
+
+    // Подсказка старта применяется ТОЛЬКО если в LocalStorage тот же файл (по имени)
+    const saved = loadSavedState();
+    const savedMatches = saved && saved.fileName === newName;
+    const lastSavedExcel = savedMatches ? (Number(saved.lastExcelRow) || 0) : 0;
+
+    let suggestedStart = 1;
+    if (lastSavedExcel > 0 && info.totalFilled) {
+      // первая заполненная строка строго после последней успешной
+      const next = info.allRows.find(r => r.excelRowNum > lastSavedExcel);
+      suggestedStart = next ? next.excelRowNum : lastSavedExcel + 1;
+    }
+
     if (!info.totalFilled) {
       warn(`Лист "${CFG.sheetName}" пуст (нет заполненных строк).`);
       state.rows = [];
@@ -785,21 +833,23 @@
       state.idx = 0;
       ui.prog.max = 0; ui.prog.value = 0;
       ui.start.disabled = true;
+      refreshSavedInfo(newName);
       input.value = '';
       return;
     }
 
-    // Подсказка стартовой строки из LocalStorage
-    const lastSaved = parseInt(localStorage.getItem(CFG.lsKey) || '-1', 10);
-    let suggestedStart = 1;
-    if (lastSaved >= 0 && lastSaved + 1 < info.totalFilled) {
-      suggestedStart = info.allRows[lastSaved + 1].excelRowNum;
-    }
-
-    // Авто-установка только если поле в дефолте ('1' или пусто)
-    const curVal = String(ui.startRow.value || '').trim();
-    if (curVal === '' || curVal === '1') {
+    // v1.36: если файл сменился — сбрасываем «Начать со строки»,
+    // чтобы не тащить значение из предыдущего файла.
+    // Если тот же файл — авто-подставляем только при дефолтном значении.
+    if (fileChanged) {
       ui.startRow.value = suggestedStart;
+      log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из LocalStorage)' : ''}.`);
+    } else {
+      const curVal = String(ui.startRow.value || '').trim();
+      if (curVal === '' || curVal === '1') {
+        ui.startRow.value = suggestedStart;
+        if (savedMatches) log(`Продолжаем с Excel#${suggestedStart} (из LocalStorage).`);
+      }
     }
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
@@ -813,6 +863,8 @@
     ui.prog.max = state.rows.length;
     ui.prog.value = 0;
     ui.start.disabled = state.rows.length === 0;
+
+    refreshSavedInfo(newName);
 
     if (state.rows.length) {
       ui.stat.textContent = `В файле заполненных: ${info.totalFilled}. Загружено: ${state.rows.length} (Excel#${effectiveStart}..#${info.lastFilled}).`;
@@ -1037,7 +1089,7 @@
         if (saveBtn3) {
           const win3 = saveBtn3.ownerDocument.defaultView;
           const pNet3 = win3.__SM_WAIT_FOR_NET__ ? win3.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
-          if (nativeSubmitButton(saveBtn3, 'thtmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
+          if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
             if (pNet3) { const n = await pNet3; if (!n) warn('  ⚠ C.3: POST не дождались'); }
             else await sleep(3000);
             ok('  ✔ "До" сохранено (fallback).');
@@ -1167,8 +1219,7 @@
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
 
-    // v1.33: перечитываем только если пользователь изменил стартовую строку
-    // (или state.rows пуст — например, после смены файла)
+    // v1.33: перечитываем файл только если пользователь изменил стартовую строку
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
       log(`Перечитывание файла с Excel#${effectiveStart}…`);
       let info;
@@ -1195,7 +1246,6 @@
       return;
     }
 
-    // state.rows уже начинается с effectiveStart — начинаем с 0
     state.idx = 0;
 
     log(`Старт: ${state.rows.length} строк, с Excel#${state.rows[0].excelRowNum} до #${state.rows[state.rows.length-1].excelRowNum}.`);
@@ -1213,8 +1263,9 @@
       try {
         await transferOne(item);
         state.stats.ok++;
-        localStorage.setItem(CFG.lsKey, state.idx);
-        ok(`✅ [${state.idx + 1}] сохранено в LocalStorage`);
+        // v1.36: сохраняем имя файла + абсолютную Excel-строку
+        saveState(state.fileName, item.excelRowNum);
+        ok(`✅ Excel#${item.excelRowNum} — сохранено в LocalStorage`);
         state.idx++;
         updateStat();
       } catch (e) {
@@ -1244,6 +1295,8 @@
     log(state.stopped
       ? `⏹ Остановлено — ✅ ${state.stats.ok} / ⚠ ${state.stats.warn} / ✖ ${state.stats.err}`
       : `✅ Готово — ✅ ${state.stats.ok} / ⚠ ${state.stats.warn} / ✖ ${state.stats.err}`);
+
+    refreshSavedInfo(state.fileName);
   }
 
   ui.start.addEventListener('click', () => { if (!state.running) runLoop(); });
