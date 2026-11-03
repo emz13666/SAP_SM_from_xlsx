@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.31
+// @version      1.33
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
-// @downloadURL  https://raw.githubusercontent.com/emz13666/SAP_SM_from_xlsx/main/sap-sm-from-xlsx.user.js
-// @updateURL    https://raw.githubusercontent.com/emz13666/SAP_SM_from_xlsx/main/sap-sm-from-xlsx.user.js
 // @grant        GM_addStyle
 // @grant        GM_info
 // @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/emz13666/SAP_SM_from_xlsx/main/sap-sm-from-xlsx.user.js
+// @updateURL    https://raw.githubusercontent.com/emz13666/SAP_SM_from_xlsx/main/sap-sm-from-xlsx.user.js
 // ==/UserScript==
 
 (function () {
@@ -105,7 +105,6 @@
   window.top.__SM_LOADED__ = true;
   if (document.getElementById('sm-panel')) return;
 
-  // Версия — из шапки @version (не хардкод)
   const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version)
     ? String(GM_info.script.version)
     : 'dev';
@@ -114,7 +113,6 @@
     sheetName: 'Выполненные работы',
     col: { A_date: 0, B_priem: 1, C_start: 2, D_end: 3, E_category: 4, F_object: 5, G_fault: 6, H_works: 7, I_sapCat: 8, J_system: 9, K_exec: 10, L_dept: 11, M_comment: 12 },
     guid: { category_otherSystems: '005056A081D31EEE96A83576BCEA81C6' },
-    // v1.31: группа зависит от колонки J (Система)
     groups: {
       modular: 'MODULAR Поддержка Модулар',
       telecom: 'LGOK-Telekom ЛГОК: Связь'
@@ -123,7 +121,7 @@
     status: { inProgress: 'E0002', solution: 'E0005' },
     fixed: { author: 'Общий ЛГОК', handler: 'Евгений Михайлович Зиновьев' },
     lsKey: 'sap_sm_xlsx_last_row',
-    textAddTimeoutMs: 60000   // v1.26: сколько ждать пункт «Решение» (мс)
+    textAddTimeoutMs: 60000
   };
 
   GM_addStyle(`
@@ -219,14 +217,12 @@
   })();
 
   // ==================== ЛОГИ ====================
-  // main — всегда в форму и консоль
   function log(msg, cls='') {
     const t = new Date().toLocaleTimeString();
     const esc = String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     ui.log.insertAdjacentHTML('beforeend', `<span style="${cls}">[${t}] ${esc}\n</span>`);
     ui.log.scrollTop = ui.log.scrollHeight; console.log('[SM]', msg);
   }
-  // v1.31: подробный лог — только при включённой галочке «подробный лог»
   function dbg(msg, cls='') {
     if (!ui.verboseLog || !ui.verboseLog.checked) return;
     log(msg, cls);
@@ -235,7 +231,6 @@
   const warn = (m) => log(m, 'color:#ff0');
   const ok   = (m) => log(m, 'color:#8f8');
 
-  // v1.24+: warn внутри transferOne инкрементит счётчик ⚠ и обновляет ui.stat
   function warnItem(m) {
     state.stats.warn++;
     warn(m);
@@ -297,12 +292,10 @@
     }
   }
 
-  // v1.30: экранирование для RegExp
   function escapeRegex(s) {
     return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  // Точное совпадение по id (старое поведение) — сначала exact, потом visible
   function findInFramesExact(id) {
     let firstMatch = null, visibleMatch = null;
     walkFrames((doc, win, depth) => {
@@ -316,7 +309,6 @@
     return visibleMatch || firstMatch;
   }
 
-  // Поиск по RegExp среди всех элементов с id — сначала visible, потом любой
   function findInFramesRegex(re) {
     let firstMatch = null, visibleMatch = null;
     walkFrames((doc, win, depth) => {
@@ -332,14 +324,11 @@
     return visibleMatch || firstMatch;
   }
 
-  // v1.30: если exact-id не найден, отрезаем C\d+(_W\d+|_V\d+)+_ и ищем по суффиксу.
-  // Пример: 'C32_W39_V41_V52_btadminh_struct.description' → найдёт 'C21_W71_V73_V74_btadminh_struct.description'
   function findInFrames(id) {
     const exact = findInFramesExact(id);
     if (exact) return exact;
-
     const stripped = String(id).replace(/^C\d+(?:_[WV]\d+)+_/, '');
-    if (stripped === id) return null; // нет C/W/V-префикса — искать по regex нечего
+    if (stripped === id) return null;
     const re = new RegExp('^C\\d+(?:_[WV]\\d+)+_' + escapeRegex(stripped) + '$');
     return findInFramesRegex(re);
   }
@@ -358,7 +347,6 @@
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  // v1.29: немедленная остановка
   class SMStoppedError extends Error {
     constructor() { super('Остановлено пользователем'); this.name = 'SMStoppedError'; }
   }
@@ -379,8 +367,6 @@
     if (!btn) { dbg('[nativeSubmit] кнопка не найдена: ' + oid, 'color:#ff0'); return false; }
     const win = btn.ownerDocument.defaultView;
     const oc = (btn.getAttribute('onclick') || '').trim();
-
-    // SAP пишет id как 'SM\x2dSPHO\x2dWC' — декодируем, иначе SAP не находит кнопку.
     const unesc = (s) => String(s).replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 
     const mLib = oc.match(/htmlbSubmitLib\s*\(\s*'htmlb'\s*,\s*this\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*([^,]+?)\s*,\s*'([^']*)'\s*,\s*(\d+)/);
@@ -405,7 +391,6 @@
       } catch (e) { dbg('[nativeSubmit] htmlbSL error: ' + e.message, 'color:#ff0'); }
     }
 
-    // Не eval(onclick). Реальный клик — браузер выполнит onclick в правильном контексте.
     try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
     realClick(btn);
     dbg(`    [nativeSubmit] realClick(btn): ${oid}`);
@@ -472,7 +457,6 @@
       try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch (e) {}
       try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
 
-      // Проверяем, что SAP не обрезал/не отбросил (нормализуем \r\n → \n)
       const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
       if (norm(el.value) !== norm(value)) {
         dbg(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}" (SAP обрезал или не принял)`, 'color:#ff0');
@@ -484,8 +468,6 @@
     return true;
   }
 
-  // ==================== DROPDOWN через меню ====================
-  // __items — это HTML-комментарий вида <!--a["KEY"]="LABEL";...-->
   function parseDropdownItems(itemsId) {
     const r = findInFrames(itemsId);
     if (!r) return { byId: {} };
@@ -584,7 +566,6 @@
     return false;
   }
 
-  // Ожидание условия через polling. Не таймаут SAP — ожидание отрисовки браузером.
   async function waitForCondition(fn, timeoutMs = 8000, pollMs = 50, label = '') {
     const t0 = Date.now();
     let last = 0;
@@ -599,8 +580,7 @@
     }
     return false;
   }
-  // v1.27: заполнение text_longtext с ожиданием появления поля и повторами.
-  // Возвращает true если удалось записать, false после всех попыток.
+
   async function fillLongTextWithRetries(value, attempts = 3, label = 'text') {
     for (let i = 1; i <= attempts; i++) {
       const found = await waitForCondition(
@@ -622,7 +602,6 @@
     return false;
   }
 
-  // v1.27: диагностика — какие C38_W62_V63_V65_* есть в DOM (для лога при неудаче)
   function diagTextLongtext() {
     const parts = [];
     walkFrames((doc) => {
@@ -637,13 +616,13 @@
     if (parts.length) dbg(`    [diag] C38_W62_V63_V65_* : ${parts.slice(0, 15).join(' | ')}${parts.length > 15 ? ` … (всего ${parts.length})` : ''}`);
     else dbg(`    [diag] нет ни одного C38_W62_V63_V65_* в DOM`);
   }
+
   async function waitForVisible(id, timeoutMs = 60000, label = '') {
     const t0 = Date.now(); let lastLog = 0;
     while (Date.now() - t0 < timeoutMs) {
       checkStop();
       const r = findInFrames(id);
       if (r && isVisible(r.el)) return r.el;
-
       const elapsed = Date.now() - t0;
       if (elapsed - lastLog > 5000) {
         lastLog = elapsed;
@@ -653,7 +632,7 @@
     }
     return null;
   }
-  // v1.28: поиск видимой кнопки "Создать сообщение" (ID меняется: C28_W96_V97, C41_W105_V106, ...)
+
   function findVisibleCreateButton() {
     let found = null;
     walkFrames((doc) => {
@@ -673,6 +652,7 @@
     });
     return found;
   }
+
   function findTextAddButton() {
     let el = findEl('C38_W62_V63_V65_TextAdd__SUSO')
           || findEl('C38_W62_V63_V65_TextAdd')
@@ -702,15 +682,70 @@
     return found;
   }
 
+  // ==================== СОСТОЯНИЕ ====================
   const state = {
     rows: [], idx: 0, running: false, paused: false, stopped: false,
-    stats: { ok: 0, warn: 0, err: 0 }
+    stats: { ok: 0, warn: 0, err: 0 },
+    // v1.33: кэш для перечитывания без повторного выбора файла
+    fileBuffer: null,
+    fileName: '',
+    parsedFrom: null,          // с какой Excel-строки загружены state.rows
+    lastFilledExcelRow: null,  // последняя заполненная строка в файле
+    totalFilled: 0             // всего заполненных строк в файле
   };
 
-  // Сброс value при клике: иначе повторный выбор ТОГО ЖЕ файла не вызывает change
+  // ==================== ЧТЕНИЕ XLSX ====================
+  // Читаем ТОЛЬКО лист CFG.sheetName. Возвращаем:
+  //   allRows:     [{excelRowNum, cells}, ...] — все заполненные строки (без заголовка)
+  //   totalFilled: количество заполненных строк
+  //   lastFilled:  Excel-номер последней заполненной строки
+  function parseXlsxBuffer(buffer) {
+    const wb = XLSX.read(new Uint8Array(buffer), {
+      type: 'array',
+      cellDates: true,
+      dense: true,
+      sheets: CFG.sheetName   // v1.33: читаем только нужный лист
+    });
+    const ws = wb.Sheets[CFG.sheetName];
+    if (!ws) throw new Error(`Лист "${CFG.sheetName}" не найден`);
+    const ref = ws['!ref'];
+    if (!ref) return { allRows: [], totalFilled: 0, lastFilled: 0 };
+    const range = XLSX.utils.decode_range(ref);
+
+    // blankrows:true — сохраняем индексацию, чтобы excelRowNum был реальным
+    const aoa = XLSX.utils.sheet_to_json(ws, {
+      header: 1, defval: '', raw: false, blankrows: true
+    });
+
+    const allRows = [];
+    for (let i = 0; i < aoa.length; i++) {
+      const excelRowNum = range.s.r + i + 1;
+      if (excelRowNum === 1) continue; // заголовок
+      const r = aoa[i];
+      let hasData = false;
+      for (let c = 0; c <= CFG.col.K_exec; c++) {
+        if (String(r[c] ?? '').trim()) { hasData = true; break; }
+      }
+      if (!hasData) continue;
+      allRows.push({ excelRowNum, cells: r });
+    }
+    const totalFilled = allRows.length;
+    const lastFilled = totalFilled ? allRows[totalFilled - 1].excelRowNum : 0;
+    return { allRows, totalFilled, lastFilled };
+  }
+
+  // Отфильтровать allRows по стартовой Excel-строке
+  function filterRowsFrom(allRows, fromExcelRow) {
+    const from = Math.max(1, parseInt(fromExcelRow, 10) || 1);
+    return from > 1
+      ? allRows.filter(x => x.excelRowNum >= from)
+      : allRows.slice(); // копия, чтобы не мутировать исходный массив
+  }
+
+  // ==================== ВЫБОР ФАЙЛА ====================
   ui.file.addEventListener('click', () => { ui.file.value = ''; });
 
-  ui.file.addEventListener('change', (e) => {
+  ui.file.addEventListener('change', async (e) => {
     const input = e.target;
     const f = input.files && input.files[0];
     if (!f) { input.value = ''; return; }
@@ -721,64 +756,76 @@
       return;
     }
 
-    // v1.31: имя выбранного файла — отдельной строкой (не сбрасывается при input.value='')
     ui.fileName.textContent = 'Текущий файл: ' + f.name;
+    state.fileName = f.name;
 
-    const resetInput = () => { try { input.value = ''; } catch(e){} };
+    try {
+      state.fileBuffer = await f.arrayBuffer();
+    } catch (ex) {
+      err('Ошибка чтения файла: ' + ex.message);
+      input.value = '';
+      return;
+    }
 
-    const rd = new FileReader();
-    rd.onerror = (ev) => {
-      err('Ошибка чтения файла: ' + (ev.target && ev.target.error && ev.target.error.message || 'unknown'));
-      resetInput();
-    };
-    rd.onload = (ev) => {
-      try {
-        const wb = XLSX.read(new Uint8Array(ev.target.result), { type:'array', cellDates:true });
-        if (!wb.SheetNames.includes(CFG.sheetName)) {
-          alert(`Лист "${CFG.sheetName}" не найден.`);
-          resetInput();
-          return;
-        }
-        const ws = wb.Sheets[CFG.sheetName];
-        const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:false, blankrows:false });
-        const filled = [];
-        for (let i = 1; i < aoa.length; i++) {
-          const r = aoa[i];
-          let hasData = false;
-          for (let c = 0; c <= CFG.col.K_exec; c++) {
-            if (String(r[c] ?? '').trim()) { hasData = true; break; }
-          }
-          if (hasData) filled.push({ excelRowNum: i + 1, cells: r });
-        }
+    let info;
+    try {
+      info = parseXlsxBuffer(state.fileBuffer);
+    } catch (ex) {
+      err('Ошибка чтения XLSX: ' + ex.message);
+      input.value = '';
+      return;
+    }
 
-        // Сброс состояния от предыдущего файла
-        state.rows = filled;
-        state.idx = 0;
-        state.stats = { ok: 0, warn: 0, err: 0 };
-        ui.prog.max = filled.length;
-        ui.prog.value = 0;
-        ui.start.disabled = false;
+    if (!info.totalFilled) {
+      warn(`Лист "${CFG.sheetName}" пуст (нет заполненных строк).`);
+      state.rows = [];
+      state.parsedFrom = null;
+      state.totalFilled = 0;
+      state.lastFilledExcelRow = 0;
+      state.idx = 0;
+      ui.prog.max = 0; ui.prog.value = 0;
+      ui.start.disabled = true;
+      input.value = '';
+      return;
+    }
 
-        const last = parseInt(localStorage.getItem(CFG.lsKey) || '-1', 10);
-        if (last >= 0 && last < filled.length - 1) {
-          const nextIdx = last + 1;
-          if (ui.startRow.value === '1' || !ui.startRow.value) {
-             ui.startRow.value = filled[nextIdx].excelRowNum;
-          }
-          ui.stat.textContent = `Заполненных строк: ${filled.length}. Продолжаем с Excel#${filled[nextIdx].excelRowNum}.`;
-        } else {
-          ui.stat.textContent = `Заполненных строк: ${filled.length}.`;
-        }
+    // Подсказка стартовой строки из LocalStorage
+    const lastSaved = parseInt(localStorage.getItem(CFG.lsKey) || '-1', 10);
+    let suggestedStart = 1;
+    if (lastSaved >= 0 && lastSaved + 1 < info.totalFilled) {
+      suggestedStart = info.allRows[lastSaved + 1].excelRowNum;
+    }
 
-        log(`Файл прочитан: ${filled.length} строк. Excel row: ${filled[0]?.excelRowNum}..${filled[filled.length-1]?.excelRowNum}`);
-      } catch (ex) {
-        err('Ошибка чтения XLSX: ' + ex.message);
-      }
-      resetInput();
-    };
-    rd.readAsArrayBuffer(f);
+    // Авто-установка только если поле в дефолте ('1' или пусто)
+    const curVal = String(ui.startRow.value || '').trim();
+    if (curVal === '' || curVal === '1') {
+      ui.startRow.value = suggestedStart;
+    }
+
+    const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
+    state.rows = filterRowsFrom(info.allRows, effectiveStart);
+    state.parsedFrom = effectiveStart;
+    state.totalFilled = info.totalFilled;
+    state.lastFilledExcelRow = info.lastFilled;
+    state.idx = 0;
+    state.stats = { ok: 0, warn: 0, err: 0 };
+
+    ui.prog.max = state.rows.length;
+    ui.prog.value = 0;
+    ui.start.disabled = state.rows.length === 0;
+
+    if (state.rows.length) {
+      ui.stat.textContent = `В файле заполненных: ${info.totalFilled}. Загружено: ${state.rows.length} (Excel#${effectiveStart}..#${info.lastFilled}).`;
+      log(`Файл прочитан: заполненных ${info.totalFilled}. Загружено ${state.rows.length} (с Excel#${effectiveStart} до #${info.lastFilled}).`);
+    } else {
+      ui.stat.textContent = `В файле заполненных: ${info.totalFilled}. Старт с Excel#${effectiveStart} — попадает за пределы данных.`;
+      warn(`Нет строк для обработки: старт Excel#${effectiveStart} > последней заполненной #${info.lastFilled}.`);
+    }
+
+    input.value = '';
   });
 
+  // ==================== ПАРСИНГ СТРОКИ ====================
   function parseRow(cells) {
     const c = CFG.col;
     const s = (i) => String(cells[i] ?? '').trim();
@@ -792,8 +839,6 @@
     const dA = formatDate(cells[c.A_date]);
     const dD = formatDate(cells[c.D_end]);
 
-    // «До»:      <дата + время приёма>  \n  <категория + объект + неисправность>
-    // «Решение»: <дата + время оконч.>  \n  <работы>  \n  <исполнитель>
     const headBefore = [dA, s(c.B_priem)].filter(Boolean).join(' ');
     const bodyBefore = [s(c.E_category), s(c.F_object), s(c.G_fault)].filter(Boolean).join(' ');
     const longTextBefore = [headBefore, bodyBefore].filter(Boolean).join('\n');
@@ -803,12 +848,12 @@
     const execSol  = s(c.K_exec);
     const longTextSolution = [headSol, worksSol, execSol].filter(Boolean).join('\n');
 
-    // v1.31: колонка J (Система) — для выбора группы поддержки
     const system = s(c.J_system);
 
     return { desc, num, longTextBefore, longTextSolution, raw: cells, iVal, system };
   }
 
+  // ==================== ШАГ 0 ====================
   async function step0_openForm() {
     log('Шаг 0.1: ждём интерфейс SAP…');
     let homeEl = await waitForVisible('C4_W16_V17_SM-SP-HOME', 60000, '«Первая страница»');
@@ -825,15 +870,14 @@
       ok('  ✔ «Первая страница»');
     }
 
-        log('Шаг 0.3: ждём кнопку «Создать сообщение»…');
-    // v1.28: ID кнопки динамический, ищем по тексту среди видимых
+    log('Шаг 0.3: ждём кнопку «Создать сообщение»…');
     let createBtn = null;
     const t0 = Date.now();
     while (Date.now() - t0 < 30000) {
       createBtn = findVisibleCreateButton();
       if (createBtn) break;
       const elapsed = Date.now() - t0;
-      if (elapsed > 5000 && elapsed % 5000 < 300) { // лог раз в 5 сек
+      if (elapsed > 5000 && elapsed % 5000 < 300) {
         dbg(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
       }
       await sleep(300);
@@ -857,19 +901,7 @@
     await debugPause('Форма инцидента открыта');
   }
 
-  // ============================================================
-  // ПОСЛЕДОВАТЕЛЬНОСТЬ
-  //   A.1 Описание → A.2 Длинный текст "до" → A.3 Автор → A.4 Обработчик
-  //   B.1 Категории (cat01 → cat02 → cat03)
-  //   B.2 Группа поддержки
-  //   B.3 Статус E0002
-  //   C.1 Сохранить (создание)
-  //   C.2 Обработать
-  //   E.1 Добавить текст → Решение  (ждёт до 60 с, повторные клики)
-  //   E.2 Текст решения + Статус E0005
-  //   E.3 Сохранить
-  //   F.1 Home
-  // ============================================================
+  // ==================== ОСНОВНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ ====================
   async function transferOne(item) {
     const d = parseRow(item.cells);
     if (!d.desc) d.desc = `Инцидент Excel#${item.excelRowNum}`;
@@ -880,7 +912,7 @@
 
     await step0_openForm();
     checkStop();
-    // ---------- A: описание + партнёры + длинный текст "до" ----------
+
     log('A.1: Короткое описание (F-G, ≤40)...');
     if (!await setFieldValue('C32_W39_V41_V52_btadminh_struct.description', d.desc)) {
       warnItem('  ⚠ Описание не записалось');
@@ -896,16 +928,14 @@
       warnItem('  ⚠ Обработчик не выбрался');
     }
 
-    // v1.27: длинный текст "до" — после F4 POST (форма перерисовывается, поле text_longtext
-    // должно появиться). Ждём появления с повторами, при неудаче — fallback в C.3 (после EDIT).
     log('A.4: Длинный текст "до" (text_longtext)...');
     let okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'A.4');
     if (!okLongBefore) {
       warnItem('  ⚠ длинный текст "до" не записался после 3 попыток — попробуем после Обработать');
     }
-    await debugPause('После A.1-A.4 (Описание, Автор, Обработчик, Длинный текст)');
+    await debugPause('После A.1-A.4');
     checkStop();
-    // ---------- B.1: Категории ----------
+
     log('B.1: Категории (dropdown)...');
     const grpNum = d.num.split('.')[0];
 
@@ -944,8 +974,7 @@
     }
     await debugPause('После Категорий');
     checkStop();
-    // ---------- B.2: Группа поддержки ----------
-    // v1.31: группа зависит от колонки J (Система)
+
     log('B.2: Группа поддержки (dropdown)...');
     const sysNorm = String(d.system || '').trim().toLowerCase();
     const isModular = CFG.modularSystems.some(x => x.toLowerCase() === sysNorm);
@@ -961,7 +990,7 @@
     }
     await debugPause('После Группы поддержки');
     checkStop();
-    // ---------- B.3: Статус E0002 ----------
+
     log('B.3: Статус «В обработке» (E0002) — dropdown...');
     const stId = 'C32_W39_V41_V52_btadminh_lcstatus';
     const stLabel = getLabelByKey(stId + '__items', CFG.status.inProgress);
@@ -973,7 +1002,6 @@
     await debugPause('После Статуса E0002');
     checkStop();
 
-    // ---------- C.1: Сохранить (создание) ----------
     log('C.1: Сохранить (создание инцидента)...');
     let saveBtn = findEl('C32_W39_V41_SAVE');
     if (!saveBtn) throw new Error('Нет кнопки «Сохранить» (C.1)');
@@ -986,7 +1014,7 @@
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
     checkStop();
-    // ---------- C.2: Обработать ----------
+
     log('C.2: «Обработать»...');
     const editBtn = await waitForVisible('C32_W39_V41_EDIT', 15000, '«Обработать»');
     if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
@@ -999,7 +1027,7 @@
     ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
     checkStop();
-    // ---------- C.3: Fallback — длинный текст "до" (если A.4 не справился) ----------
+
     if (!okLongBefore) {
       log('C.3: Fallback — длинный текст "до" после Обработать...');
       okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'C.3');
@@ -1020,10 +1048,6 @@
       }
     }
 
-    // ---------- E.1: Добавить текст → Решение ----------
-    // v1.26: ждём до 60 с; если через 2 с пункта нет — кликаем по «Добавить текст» снова.
-    // Если меню уже открыто — не кликаем (иначе закроем).
-    // Если за 60 с не появился — throw (батч остановится, строка не уйдёт в «успешные»).
     log('E.1: «Добавить текст» → «Решение»...');
     const menuBtn = findTextAddButton();
     if (!menuBtn) throw new Error('Кнопка «Добавить текст» не найдена');
@@ -1043,7 +1067,7 @@
     ok('  ✔ «Решение» выбрано.');
     await debugPause('После «Решение»');
     checkStop();
-    // ---------- E.2: Текст решения + Статус E0005 ----------
+
     log('E.2: Текст решения + Статус E0005...');
     if (!await setFieldValue('C38_W62_V63_V65_text_longtext', d.longTextSolution)) {
       warnItem('  ⚠ текст решения не записался');
@@ -1056,7 +1080,6 @@
       warnItem(`  ⚠ статус E0005 не найден в __items — статус не изменится`);
     }
 
-    // ---------- E.3: Сохранить (решение) ----------
     log('E.3: Сохранить (решение)...');
     const saveBtn2 = findEl('C32_W39_V41_SAVE');
     if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
@@ -1069,7 +1092,7 @@
     ok('  ✔ Решение записано.');
     await debugPause('После сохранения решения');
     checkStop();
-    // ---------- F.1: Home ----------
+
     log('F.1: «Первая страница»...');
     const homeBtn = findEl('C4_W16_V17_SM-SP-HOME');
     if (homeBtn) {
@@ -1083,17 +1106,12 @@
     }
   }
 
-  // v1.26: ждёт появления пункта «Решение» в меню «Добавить текст».
-  // Кликает по menuBtn (не чаще 1 раза в 2 сек), если пункт не появился.
-  // Если меню уже открыто — не кликает повторно.
-  // Возвращает видимый <A> (или элемент) с id ...TextAdd__items____SUSO, либо null по таймауту.
   async function waitForSolutionMenuItem(menuBtn, timeoutMs) {
     const SOL_ID = 'C38_W62_V63_V65_TextAdd__items____SUSO';
     const t0 = Date.now();
     let lastClick = 0;
     let lastLog = 0;
 
-    // Первый клик — сразу
     realClick(menuBtn);
     lastClick = Date.now();
 
@@ -1102,7 +1120,6 @@
       const sol = findEl(SOL_ID);
       if (sol && sol.offsetParent) return sol;
 
-      // Если давно не кликали — кликаем снова (SAP иногда не открывает меню с первого раза)
       if (Date.now() - lastClick > 2000) {
         realClick(menuBtn);
         lastClick = Date.now();
@@ -1135,23 +1152,53 @@
     checkStop();
   }
 
+  // ==================== ЦИКЛ ====================
   async function runLoop() {
     state.running = true; state.stopped = false; state.paused = false;
     state.stats = { ok: 0, warn: 0, err: 0 };
     ui.start.disabled = true; ui.pause.disabled = false; ui.stop.disabled = false;
     ui.pause.textContent = '⏸ Пауза';
 
-    const startFromUi = parseInt(ui.startRow.value || '1', 10);
-    let idxByExcel = state.rows.findIndex(r => r.excelRowNum >= startFromUi);
-    if (idxByExcel < 0) idxByExcel = 0;
-    let idx = idxByExcel;
-    if (idx >= state.rows.length) {
-      warn(`Стартовый индекс ${idx} ≥ ${state.rows.length}.`);
+    if (!state.fileBuffer) {
+      err('Файл не выбран.');
       state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
       return;
     }
-    state.idx = idx;
-    log(`Старт с индекса ${idx} (Excel строка ${state.rows[idx].excelRowNum}).`);
+
+    const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
+
+    // v1.33: перечитываем только если пользователь изменил стартовую строку
+    // (или state.rows пуст — например, после смены файла)
+    if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
+      log(`Перечитывание файла с Excel#${effectiveStart}…`);
+      let info;
+      try {
+        info = parseXlsxBuffer(state.fileBuffer);
+      } catch (ex) {
+        err('Ошибка перечитывания: ' + ex.message);
+        state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
+        return;
+      }
+      state.rows = filterRowsFrom(info.allRows, effectiveStart);
+      state.parsedFrom = effectiveStart;
+      state.totalFilled = info.totalFilled;
+      state.lastFilledExcelRow = info.lastFilled;
+      state.idx = 0;
+      ui.prog.max = state.rows.length;
+      ui.prog.value = 0;
+      log(`Загружено ${state.rows.length} строк (Excel#${effectiveStart}..#${info.lastFilled}).`);
+    }
+
+    if (state.rows.length === 0) {
+      err(`Нет строк для обработки (старт Excel#${effectiveStart}, последняя заполненная #${state.lastFilledExcelRow}).`);
+      state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
+      return;
+    }
+
+    // state.rows уже начинается с effectiveStart — начинаем с 0
+    state.idx = 0;
+
+    log(`Старт: ${state.rows.length} строк, с Excel#${state.rows[0].excelRowNum} до #${state.rows[state.rows.length-1].excelRowNum}.`);
 
     // v1.31: во время прогона поле «Начать со строки» превращается в счётчик
     ui.startRowLabel.textContent = 'Текущая строка Excel:';
@@ -1160,7 +1207,6 @@
     while (state.idx < state.rows.length && !state.stopped) {
       if (state.paused) { await sleep(300); continue; }
       const item = state.rows[state.idx];
-      // v1.31: счётчик текущей строки
       ui.startRow.value = item.excelRowNum;
       updateStat();
       ui.prog.value = state.idx;
@@ -1190,7 +1236,6 @@
     }
 
     state.running = false;
-    // v1.31: вернуть поле «Начать со строки» в обычный вид
     ui.startRowLabel.textContent = 'Начать со строки:';
     ui.startRow.readOnly = false;
 
@@ -1209,7 +1254,6 @@
   ui.stop.addEventListener('click', () => {
     state.stopped = true;
     state.paused = false;
-    // v1.29: сразу обновить "Начать со строки" на текущую позицию
     if (state.rows && state.rows.length > 0 && state.idx >= 0 && state.idx < state.rows.length) {
       const curExcel = state.rows[state.idx].excelRowNum;
       ui.startRow.value = curExcel;
