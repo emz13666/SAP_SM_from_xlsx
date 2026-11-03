@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.30
+// @version      1.31
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
@@ -114,7 +114,12 @@
     sheetName: 'Выполненные работы',
     col: { A_date: 0, B_priem: 1, C_start: 2, D_end: 3, E_category: 4, F_object: 5, G_fault: 6, H_works: 7, I_sapCat: 8, J_system: 9, K_exec: 10, L_dept: 11, M_comment: 12 },
     guid: { category_otherSystems: '005056A081D31EEE96A83576BCEA81C6' },
-    defaultSupportGroup: 'MODULAR Поддержка Модулар',
+    // v1.31: группа зависит от колонки J (Система)
+    groups: {
+      modular: 'MODULAR Поддержка Модулар',
+      telecom: 'LGOK-Telekom ЛГОК: Связь'
+    },
+    modularSystems: ['Modular', 'КОБУС', 'Серверное оборудование', 'Серверное программное обеспечение'],
     status: { inProgress: 'E0002', solution: 'E0005' },
     fixed: { author: 'Общий ЛГОК', handler: 'Евгений Михайлович Зиновьев' },
     lsKey: 'sap_sm_xlsx_last_row',
@@ -153,15 +158,19 @@
       </span>
     </h3>
     <div id="sm-body">
-      <div class="row"><input type="file" id="sm-file" accept=".xlsx,.xls"/></div>
       <div class="row">
-        <label>Начать со строки:
+        <input type="file" id="sm-file" accept=".xlsx,.xls"/>
+        <div id="sm-fileName" style="margin-top:3px;color:#555;">Текущий файл: —</div>
+      </div>
+      <div class="row">
+        <label><span id="sm-startRowLabel">Начать со строки:</span>
           <input type="number" id="sm-startRow" min="1" value="1"/>
         </label>
       </div>
       <div class="row">
         <label><input type="checkbox" id="sm-step"/> пошагово (строки)</label>
         <label style="margin-left:10px;color:#0a6ed1;font-weight:bold;"><input type="checkbox" id="sm-debugActions"/> ДЕТАЛЬНАЯ ОТЛАДКА</label>
+        <label style="margin-left:10px;"><input type="checkbox" id="sm-verboseLog"/> подробный лог</label>
       </div>
       <div class="row">
         <button id="sm-start" disabled>▶ Старт</button>
@@ -177,7 +186,9 @@
 
   const $ = (s) => panel.querySelector(s);
   const ui = {
-    file: $('#sm-file'), startRow: $('#sm-startRow'), step: $('#sm-step'), debugActions: $('#sm-debugActions'),
+    file: $('#sm-file'), fileName: $('#sm-fileName'),
+    startRow: $('#sm-startRow'), startRowLabel: $('#sm-startRowLabel'),
+    step: $('#sm-step'), debugActions: $('#sm-debugActions'), verboseLog: $('#sm-verboseLog'),
     start: $('#sm-start'), pause: $('#sm-pause'), cont: $('#sm-continue'), stop: $('#sm-stop'),
     prog: $('#sm-progress'), stat: $('#sm-stat'), log: $('#sm-log'), title: $('#sm-title'),
   };
@@ -207,11 +218,18 @@
     document.addEventListener('mouseup', () => { dragging = false; });
   })();
 
+  // ==================== ЛОГИ ====================
+  // main — всегда в форму и консоль
   function log(msg, cls='') {
     const t = new Date().toLocaleTimeString();
     const esc = String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     ui.log.insertAdjacentHTML('beforeend', `<span style="${cls}">[${t}] ${esc}\n</span>`);
     ui.log.scrollTop = ui.log.scrollHeight; console.log('[SM]', msg);
+  }
+  // v1.31: подробный лог — только при включённой галочке «подробный лог»
+  function dbg(msg, cls='') {
+    if (!ui.verboseLog || !ui.verboseLog.checked) return;
+    log(msg, cls);
   }
   const err  = (m) => log(m, 'color:#f88');
   const warn = (m) => log(m, 'color:#ff0');
@@ -358,7 +376,7 @@
   }
 
   function nativeSubmitButton(btn, evtType, oid, id, cnt) {
-    if (!btn) { warn('[nativeSubmit] кнопка не найдена: ' + oid); return false; }
+    if (!btn) { dbg('[nativeSubmit] кнопка не найдена: ' + oid, 'color:#ff0'); return false; }
     const win = btn.ownerDocument.defaultView;
     const oc = (btn.getAttribute('onclick') || '').trim();
 
@@ -372,9 +390,9 @@
       const idVal  = unesc(idRaw);
       try {
         win.htmlbSubmitLib('htmlb', btn, evt, frm, oidVal, idVal, parseInt(cntRaw, 10));
-        log(`    [nativeSubmit] htmlbSubmitLib: ${evt} | ${frm} | oid=${oidVal} | id=${idVal}`);
+        dbg(`    [nativeSubmit] htmlbSubmitLib: ${evt} | ${frm} | oid=${oidVal} | id=${idVal}`);
         return true;
-      } catch (e) { warn('[nativeSubmit] htmlbSubmitLib error: ' + e.message); }
+      } catch (e) { dbg('[nativeSubmit] htmlbSubmitLib error: ' + e.message, 'color:#ff0'); }
     }
 
     const mSL = oc.match(/htmlbSL\s*\(\s*this\s*,\s*(\d+)\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
@@ -382,15 +400,15 @@
       const [_, n, evtId, cntRaw] = mSL;
       try {
         win.htmlbSL(btn, parseInt(n, 10), unesc(evtId), unesc(cntRaw));
-        log(`    [nativeSubmit] htmlbSL: ${evtId} | n=${n} | cnt=${cntRaw}`);
+        dbg(`    [nativeSubmit] htmlbSL: ${evtId} | n=${n} | cnt=${cntRaw}`);
         return true;
-      } catch (e) { warn('[nativeSubmit] htmlbSL error: ' + e.message); }
+      } catch (e) { dbg('[nativeSubmit] htmlbSL error: ' + e.message, 'color:#ff0'); }
     }
 
     // Не eval(onclick). Реальный клик — браузер выполнит onclick в правильном контексте.
     try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
     realClick(btn);
-    log(`    [nativeSubmit] realClick(btn): ${oid}`);
+    dbg(`    [nativeSubmit] realClick(btn): ${oid}`);
     return true;
   }
 
@@ -408,12 +426,12 @@
 
   async function setFieldValue(id, value, isLookup = false) {
     const r = findInFrames(id);
-    if (!r) { warn('setFieldValue: нет #' + id); return false; }
+    if (!r) { dbg('setFieldValue: нет #' + id, 'color:#ff0'); return false; }
     const el = r.el;
     const win = r.win;
 
     if (el.disabled || el.readOnly) {
-      warn(`setFieldValue: #${id.split('/').pop()} disabled/readOnly — пропускаю`);
+      dbg(`setFieldValue: #${id.split('/').pop()} disabled/readOnly — пропускаю`, 'color:#ff0');
       return false;
     }
 
@@ -435,7 +453,7 @@
 
       if (pNet) {
         const netOk = await pNet;
-        if (!netOk) warn(`  ⚠ lookup #${id.split('/').pop()}: POST BSPWDApplication.do не дождались`);
+        if (!netOk) dbg(`  ⚠ lookup #${id.split('/').pop()}: POST BSPWDApplication.do не дождались`, 'color:#ff0');
       }
 
       await waitForCondition(
@@ -445,10 +463,10 @@
       );
 
       if (!el.value || el.value.includes('отсутствует')) {
-        warn(`  ⚠ lookup #${id.split('/').pop()} не выбрался (значение "${el.value}")`);
+        dbg(`  ⚠ lookup #${id.split('/').pop()} не выбрался (значение "${el.value}")`, 'color:#ff0');
         return false;
       }
-      log(`    [F4] ✔ #${id.split('/').pop()} = "${el.value}"`);
+      dbg(`    [F4] ✔ #${id.split('/').pop()} = "${el.value}"`);
     } else {
       el.value = value;
       try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch (e) {}
@@ -457,11 +475,11 @@
       // Проверяем, что SAP не обрезал/не отбросил (нормализуем \r\n → \n)
       const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
       if (norm(el.value) !== norm(value)) {
-        warn(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}" (SAP обрезал или не принял)`);
+        dbg(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}" (SAP обрезал или не принял)`, 'color:#ff0');
         return false;
       }
       const preview = el.value.length > 80 ? el.value.slice(0, 80) + '…' : el.value;
-      log(`    [field] ✔ #${id.split('/').pop()} = "${String(preview).replace(/\n/g, '⏎')}"`);
+      dbg(`    [field] ✔ #${id.split('/').pop()} = "${String(preview).replace(/\n/g, '⏎')}"`);
     }
     return true;
   }
@@ -508,18 +526,18 @@
 
   async function setDropdownByLabel(id, label) {
     const r = findInFrames(id);
-    if (!r) { warn('setDropdownByLabel: нет #' + id.split('/').pop()); return false; }
+    if (!r) { dbg('setDropdownByLabel: нет #' + id.split('/').pop(), 'color:#ff0'); return false; }
     const el = r.el;
 
-    if (el.disabled) { warn(`setDropdownByLabel: #${id.split('/').pop()} disabled`); return false; }
+    if (el.disabled) { dbg(`setDropdownByLabel: #${id.split('/').pop()} disabled`, 'color:#ff0'); return false; }
 
     if ((el.value || '').trim() === label) {
-      log(`    [dropdown] #${id.split('/').pop()} уже = "${label}"`);
+      dbg(`    [dropdown] #${id.split('/').pop()} уже = "${label}"`);
       return true;
     }
 
     const btn = findEl(id + '-btn');
-    if (!btn) { warn(`setDropdownByLabel: нет #${id.split('/').pop()}-btn`); return false; }
+    if (!btn) { dbg(`setDropdownByLabel: нет #${id.split('/').pop()}-btn`, 'color:#ff0'); return false; }
 
     try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
     realClick(btn);
@@ -542,7 +560,7 @@
         .filter(a => a.offsetParent)
         .slice(0, 12)
         .map(a => JSON.stringify((a.textContent || '').trim().slice(0, 50)));
-      warn(`    [dropdown] пункт "${label}" не появился за 8 с. Видимые <A>: ${sample.join(', ')}`);
+      dbg(`    [dropdown] пункт "${label}" не появился за 8 с. Видимые <A>: ${sample.join(', ')}`, 'color:#ff0');
       return false;
     }
 
@@ -551,18 +569,18 @@
       ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000)
       : Promise.resolve(false);
 
-    log(`    [dropdown] клик по <A>: "${(target.textContent||'').trim()}"`);
+    dbg(`    [dropdown] клик по <A>: "${(target.textContent||'').trim()}"`);
     realClick(target);
 
     const netOk = await pNet;
-    if (!netOk) warn(`    [dropdown] POST BSPWDApplication.do не дождались`);
+    if (!netOk) dbg(`    [dropdown] POST BSPWDApplication.do не дождались`, 'color:#ff0');
 
     const val = (el.value || '').trim();
     if (val === label) {
-      log(`    [dropdown] ✔ #${id.split('/').pop()} = "${val}"`);
+      dbg(`    [dropdown] ✔ #${id.split('/').pop()} = "${val}"`);
       return true;
     }
-    warn(`    [dropdown] #${id.split('/').pop()}: значение "${val}" ≠ ожидаемому "${label}"`);
+    dbg(`    [dropdown] #${id.split('/').pop()}: значение "${val}" ≠ ожидаемому "${label}"`, 'color:#ff0');
     return false;
   }
 
@@ -575,7 +593,7 @@
       try { if (fn()) return true; } catch(e){}
       if (Date.now() - t0 - last > 2000) {
         last = Date.now() - t0;
-        log(`    … ждём ${label || 'условие'} (${Math.round(last/1000)} с)`);
+        dbg(`    … ждём ${label || 'условие'} (${Math.round(last/1000)} с)`);
       }
       await new Promise(r => setTimeout(r, pollMs));
     }
@@ -590,15 +608,15 @@
         5000, 100, `${label} text_longtext (попытка ${i}/${attempts})`
       );
       if (!found) {
-        log(`  [${label}] поле text_longtext не появилось за 5 с (попытка ${i}/${attempts})`);
+        dbg(`  [${label}] поле text_longtext не появилось за 5 с (попытка ${i}/${attempts})`);
         diagTextLongtext();
         continue;
       }
       if (await setFieldValue('C38_W62_V63_V65_text_longtext', value)) {
-        log(`  [${label}] ✔ записано (попытка ${i}/${attempts})`);
+        dbg(`  [${label}] ✔ записано (попытка ${i}/${attempts})`);
         return true;
       }
-      log(`  [${label}] setFieldValue вернул false (попытка ${i}/${attempts})`);
+      dbg(`  [${label}] setFieldValue вернул false (попытка ${i}/${attempts})`);
       await sleep(1000);
     }
     return false;
@@ -616,8 +634,8 @@
         }
       } catch(e) {}
     });
-    if (parts.length) log(`    [diag] C38_W62_V63_V65_* : ${parts.slice(0, 15).join(' | ')}${parts.length > 15 ? ` … (всего ${parts.length})` : ''}`);
-    else log(`    [diag] нет ни одного C38_W62_V63_V65_* в DOM`);
+    if (parts.length) dbg(`    [diag] C38_W62_V63_V65_* : ${parts.slice(0, 15).join(' | ')}${parts.length > 15 ? ` … (всего ${parts.length})` : ''}`);
+    else dbg(`    [diag] нет ни одного C38_W62_V63_V65_* в DOM`);
   }
   async function waitForVisible(id, timeoutMs = 60000, label = '') {
     const t0 = Date.now(); let lastLog = 0;
@@ -629,7 +647,7 @@
       const elapsed = Date.now() - t0;
       if (elapsed - lastLog > 5000) {
         lastLog = elapsed;
-        log(`    … ждём ${label || '#' + id} (${Math.round(elapsed/1000)} с)`);
+        dbg(`    … ждём ${label || '#' + id} (${Math.round(elapsed/1000)} с)`);
       }
       await sleep(300);
     }
@@ -702,6 +720,9 @@
       input.value = '';
       return;
     }
+
+    // v1.31: имя выбранного файла — отдельной строкой (не сбрасывается при input.value='')
+    ui.fileName.textContent = 'Текущий файл: ' + f.name;
 
     const resetInput = () => { try { input.value = ''; } catch(e){} };
 
@@ -782,7 +803,10 @@
     const execSol  = s(c.K_exec);
     const longTextSolution = [headSol, worksSol, execSol].filter(Boolean).join('\n');
 
-    return { desc, num, longTextBefore, longTextSolution, raw: cells, iVal };
+    // v1.31: колонка J (Система) — для выбора группы поддержки
+    const system = s(c.J_system);
+
+    return { desc, num, longTextBefore, longTextSolution, raw: cells, iVal, system };
   }
 
   async function step0_openForm() {
@@ -810,7 +834,7 @@
       if (createBtn) break;
       const elapsed = Date.now() - t0;
       if (elapsed > 5000 && elapsed % 5000 < 300) { // лог раз в 5 сек
-        log(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
+        dbg(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
       }
       await sleep(300);
     }
@@ -921,10 +945,15 @@
     await debugPause('После Категорий');
     checkStop();
     // ---------- B.2: Группа поддержки ----------
+    // v1.31: группа зависит от колонки J (Система)
     log('B.2: Группа поддержки (dropdown)...');
+    const sysNorm = String(d.system || '').trim().toLowerCase();
+    const isModular = CFG.modularSystems.some(x => x.toLowerCase() === sysNorm);
+    const groupLabel = isModular ? CFG.groups.modular : CFG.groups.telecom;
+    log(`  Система (J) = "${d.system || '—'}" → Группа = "${groupLabel}"`);
     const okGroup = await setDropdownByLabel(
       'C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_03',
-      CFG.defaultSupportGroup
+      groupLabel
     );
     if (!okGroup) {
       err('  ✖ Группа не выбралась. Сохранение прервётся (SAP не даст создать инцидент без группы).');
@@ -1081,7 +1110,7 @@
 
       if (Date.now() - t0 - lastLog > 5000) {
         lastLog = Date.now() - t0;
-        log(`    … ждём пункт «Решение» (${Math.round(lastLog/1000)} с)`);
+        dbg(`    … ждём пункт «Решение» (${Math.round(lastLog/1000)} с)`);
       }
       await sleep(200);
     }
@@ -1124,9 +1153,15 @@
     state.idx = idx;
     log(`Старт с индекса ${idx} (Excel строка ${state.rows[idx].excelRowNum}).`);
 
+    // v1.31: во время прогона поле «Начать со строки» превращается в счётчик
+    ui.startRowLabel.textContent = 'Текущая строка Excel:';
+    ui.startRow.readOnly = true;
+
     while (state.idx < state.rows.length && !state.stopped) {
       if (state.paused) { await sleep(300); continue; }
       const item = state.rows[state.idx];
+      // v1.31: счётчик текущей строки
+      ui.startRow.value = item.excelRowNum;
       updateStat();
       ui.prog.value = state.idx;
       try {
@@ -1155,6 +1190,10 @@
     }
 
     state.running = false;
+    // v1.31: вернуть поле «Начать со строки» в обычный вид
+    ui.startRowLabel.textContent = 'Начать со строки:';
+    ui.startRow.readOnly = false;
+
     ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
     ui.pause.textContent = '⏸ Пауза';
     log(state.stopped
