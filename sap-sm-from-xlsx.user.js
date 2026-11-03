@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.36
+// @version      1.37
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
@@ -120,7 +120,6 @@
     modularSystems: ['Modular', 'КОБУС', 'Серверное оборудование', 'Серверное программное обеспечение'],
     status: { inProgress: 'E0002', solution: 'E0005' },
     fixed: { author: 'Общий ЛГОК', handler: 'Евгений Михайлович Зиновьев' },
-    // v1.36: JSON { fileName, lastExcelRow }
     lsKey: 'sap_sm_xlsx_state',
     textAddTimeoutMs: 60000
   };
@@ -429,6 +428,7 @@
       el.value = value;
       try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(e){}
 
+      // F4: submitonenter идёт настоящим XHR/fetch — хук его ловит
       const pNet = win.__SM_WAIT_FOR_NET__
         ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000)
         : null;
@@ -689,14 +689,13 @@
     rows: [], idx: 0, running: false, paused: false, stopped: false,
     stats: { ok: 0, warn: 0, err: 0 },
     fileBuffer: null,
-    fileName: null,          // v1.36: отпечаток файла = только имя
+    fileName: null,
     parsedFrom: null,
     lastFilledExcelRow: null,
     totalFilled: 0
   };
 
   // ==================== ФАЙЛ: ИМЯ + LOCALSTORAGE ====================
-  // v1.36: идентификатор файла = только имя (без size/lastModified).
   function loadSavedState() {
     try {
       const raw = localStorage.getItem(CFG.lsKey);
@@ -806,20 +805,17 @@
       return;
     }
 
-    // v1.36: идентификатор — только имя файла
     const oldName = state.fileName;
     const newName = f.name;
     const fileChanged = oldName !== newName;
     state.fileName = newName;
 
-    // Подсказка старта применяется ТОЛЬКО если в LocalStorage тот же файл (по имени)
     const saved = loadSavedState();
     const savedMatches = saved && saved.fileName === newName;
     const lastSavedExcel = savedMatches ? (Number(saved.lastExcelRow) || 0) : 0;
 
     let suggestedStart = 1;
     if (lastSavedExcel > 0 && info.totalFilled) {
-      // первая заполненная строка строго после последней успешной
       const next = info.allRows.find(r => r.excelRowNum > lastSavedExcel);
       suggestedStart = next ? next.excelRowNum : lastSavedExcel + 1;
     }
@@ -838,9 +834,6 @@
       return;
     }
 
-    // v1.36: если файл сменился — сбрасываем «Начать со строки»,
-    // чтобы не тащить значение из предыдущего файла.
-    // Если тот же файл — авто-подставляем только при дефолтном значении.
     if (fileChanged) {
       ui.startRow.value = suggestedStart;
       log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из LocalStorage)' : ''}.`);
@@ -914,12 +907,14 @@
 
     log('Шаг 0.2: «Первая страница»…');
     const homeLink = findEl('C4_W16_V17_SM-SP-HOME');
-    const winH = homeLink.ownerDocument.defaultView;
-    const pNetHome = winH.__SM_WAIT_FOR_NET__ ? winH.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 10000) : null;
     if (nativeSubmitButton(homeLink, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
-      if (pNetHome) { const n = await pNetHome; if (!n) warn('  ⚠ 0.2: POST не дождались'); }
-      else await sleep(3000);
-      ok('  ✔ «Первая страница»');
+      // v1.37: Home — навигация, ждём DOM-маркер (кнопка «Создать сообщение»)
+      const homeOk = await waitForCondition(
+        () => !!findVisibleCreateButton(),
+        20000, 200, 'переход на главную (0.2)'
+      );
+      if (homeOk) ok('  ✔ «Первая страница»');
+      else warn('  ⚠ 0.2: главная не загрузилась (нет «Создать сообщение»)');
     }
 
     log('Шаг 0.3: ждём кнопку «Создать сообщение»…');
@@ -939,13 +934,10 @@
     log('Шаг 0.4: «Создать сообщение»…');
     await debugPause('Перед нажатием «Создать сообщение»');
 
-    const winC = createBtn.ownerDocument.defaultView;
-    const pNetCreate = winC.__SM_WAIT_FOR_NET__ ? winC.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
     nativeSubmitButton(createBtn, 'thtmlb:button:click:0', 'C28_W96_V97_CREATE', 'INCIDENT_CREATE', 0);
 
-    let descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 30000, 'поле «Описание»');
-    if (pNetCreate) await pNetCreate;
-
+    // v1.37: маркер открытия формы — поле «Описание»
+    let descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 40000, 'поле «Описание»');
     if (!descField) descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 10000, 'поле «Описание»');
     if (!descField) throw new Error('Форма не открылась');
     ok('  ✔ форма инцидента открыта');
@@ -1054,32 +1046,43 @@
     await debugPause('После Статуса E0002');
     checkStop();
 
+    // ---------- C.1: Сохранить (создание) ----------
     log('C.1: Сохранить (создание инцидента)...');
     let saveBtn = findEl('C32_W39_V41_SAVE');
     if (!saveBtn) throw new Error('Нет кнопки «Сохранить» (C.1)');
-    let winSave = saveBtn.ownerDocument.defaultView;
-    let pNet = winSave.__SM_WAIT_FOR_NET__ ? winSave.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
-    if (!nativeSubmitButton(saveBtn, 'thtmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
+    if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
-    if (pNet) { const n = await pNet; if (!n) warn('  ⚠ C.1: POST BSPWDApplication.do не дождались'); }
-    else await sleep(3000);
+    // v1.37: SAVE — навигация (не AJAX). Ждём DOM-маркер view-режима — кнопку «Обработать».
+    const editAppeared = await waitForCondition(
+      () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
+      40000, 200, 'перезагрузка после SAVE (C.1)'
+    );
+    if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1): форма не вернулась');
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
     checkStop();
 
+    // ---------- C.2: Обработать ----------
     log('C.2: «Обработать»...');
-    const editBtn = await waitForVisible('C32_W39_V41_EDIT', 15000, '«Обработать»');
+    const editBtn = findEl('C32_W39_V41_EDIT');
     if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
-    let winEdit = editBtn.ownerDocument.defaultView;
-    pNet = winEdit.__SM_WAIT_FOR_NET__ ? winEdit.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
-    if (!nativeSubmitButton(editBtn, 'thtmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
+    if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
       throw new Error('Не могу нажать «Обработать» (C.2)');
-    if (pNet) { const n = await pNet; if (!n) warn('  ⚠ C.2: POST BSPWDApplication.do не дождались'); }
-    else await sleep(3000);
+    // v1.37: EDIT — навигация. Маркер edit-режима — появление E0005 в __items статуса.
+    const e0005Ready = await waitForCondition(
+      () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
+      40000, 200, 'E0005 в __items после EDIT (C.2)'
+    );
+    if (!e0005Ready) {
+      const items = parseDropdownItems(stId + '__items').byId;
+      dbg(`    [diag] __items статуса после EDIT: ${JSON.stringify(items).slice(0, 400)}`);
+      throw new Error('После EDIT в __items не появился E0005 — форма не перешла в режим редактирования');
+    }
     ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
     checkStop();
 
+    // ---------- C.3: Fallback — длинный текст "до" (если A.4 не справился) ----------
     if (!okLongBefore) {
       log('C.3: Fallback — длинный текст "до" после Обработать...');
       okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'C.3');
@@ -1087,12 +1090,14 @@
         log('C.3: сохраняем "до" перед Решением...');
         const saveBtn3 = findEl('C32_W39_V41_SAVE');
         if (saveBtn3) {
-          const win3 = saveBtn3.ownerDocument.defaultView;
-          const pNet3 = win3.__SM_WAIT_FOR_NET__ ? win3.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
-            if (pNet3) { const n = await pNet3; if (!n) warn('  ⚠ C.3: POST не дождались'); }
-            else await sleep(3000);
-            ok('  ✔ "До" сохранено (fallback).');
+            // v1.37: ждём появления EDIT (вернулись в view-режим)
+            const back = await waitForCondition(
+              () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
+              20000, 200, 'перезагрузка после SAVE (C.3)'
+            );
+            if (back) ok('  ✔ "До" сохранено (fallback).');
+            else warn('  ⚠ C.3: после SAVE не появилась кнопка «Обработать»');
           }
         }
       } else {
@@ -1100,6 +1105,7 @@
       }
     }
 
+    // ---------- E.1: Добавить текст → Решение ----------
     log('E.1: «Добавить текст» → «Решение»...');
     const menuBtn = findTextAddButton();
     if (!menuBtn) throw new Error('Кнопка «Добавить текст» не найдена');
@@ -1111,50 +1117,77 @@
       throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
     }
 
-    const winSol = solItem.ownerDocument.defaultView;
-    const pNetSol = winSol.__SM_WAIT_FOR_NET__
-      ? winSol.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
+    // Запоминаем предыдущее значение text_longtext, чтобы отличить «SAP очистил» от «поле исчезло»
+    const ltBefore = (findEl('C38_W62_V63_V65_text_longtext') || {}).value || '';
+
     realClick(solItem);
-    if (pNetSol) { const n = await pNetSol; if (!n) warn('  ⚠ E.1: POST не дождались'); }
+    // v1.37: после выбора «Решение» SAP перерисовывает text_longtext (обычно очищает).
+    // Маркер — поле существует и его значение изменилось (стало пустым или другим).
+    const ltChanged = await waitForCondition(
+      () => {
+        const el = findEl('C38_W62_V63_V65_text_longtext');
+        if (!el) return false;
+        const v = el.value || '';
+        return v !== ltBefore;
+      },
+      15000, 200, 'перерисовка text_longtext после «Решение»'
+    );
+    if (!ltChanged) warn('  ⚠ E.1: text_longtext не перерисовался после «Решение» (продолжаем)');
     ok('  ✔ «Решение» выбрано.');
     await debugPause('После «Решение»');
     checkStop();
 
+    // ---------- E.2: Текст решения + Статус E0005 ----------
     log('E.2: Текст решения + Статус E0005...');
     if (!await setFieldValue('C38_W62_V63_V65_text_longtext', d.longTextSolution)) {
       warnItem('  ⚠ текст решения не записался');
     }
 
+    // v1.37: E0005 уже должен быть (проверено в C.2), но подождём ещё 5 с на всякий случай
+    await waitForCondition(
+      () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
+      5000, 200, 'E0005 в __items (E.2)'
+    );
     const stLabel2 = getLabelByKey(stId + '__items', CFG.status.solution);
     if (stLabel2) {
       if (!await setDropdownByLabel(stId, stLabel2)) warnItem(`  ⚠ статус E0005 не выбрался ("${stLabel2}")`);
     } else {
+      const items = parseDropdownItems(stId + '__items').byId;
       warnItem(`  ⚠ статус E0005 не найден в __items — статус не изменится`);
+      dbg(`    [diag] __items статуса (E.2): ${JSON.stringify(items).slice(0, 400)}`);
     }
 
+    // ---------- E.3: Сохранить (решение) ----------
     log('E.3: Сохранить (решение)...');
     const saveBtn2 = findEl('C32_W39_V41_SAVE');
     if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
-    const win2 = saveBtn2.ownerDocument.defaultView;
-    const pNet2 = win2.__SM_WAIT_FOR_NET__ ? win2.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
-    if (!nativeSubmitButton(saveBtn2, 'thtmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
+    if (!nativeSubmitButton(saveBtn2, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (E.3)');
-    if (pNet2) { const n = await pNet2; if (!n) warn('  ⚠ E.3: POST не дождались'); }
-    else await sleep(3000);
+    // v1.37: после SAVE решения возвращаемся в view-режим (кнопка «Обработать»)
+    const backView = await waitForCondition(
+      () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
+      30000, 200, 'перезагрузка после SAVE (E.3)'
+    );
+    if (!backView) warn('  ⚠ E.3: после SAVE не появилась кнопка «Обработать»');
     ok('  ✔ Решение записано.');
     await debugPause('После сохранения решения');
     checkStop();
 
+    // ---------- F.1: Home ----------
     log('F.1: «Первая страница»...');
     const homeBtn = findEl('C4_W16_V17_SM-SP-HOME');
     if (homeBtn) {
-      const winH = homeBtn.ownerDocument.defaultView;
-      const pNetH = winH.__SM_WAIT_FOR_NET__ ? winH.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
       if (nativeSubmitButton(homeBtn, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
-        if (pNetH) { const n = await pNetH; if (!n) warn('  ⚠ F.1: POST не дождались'); }
-        else await sleep(3000);
-        ok('  ✔ На главной.');
+        // v1.37: маркер перехода на главную — кнопка «Создать сообщение»
+        const homeOk = await waitForCondition(
+          () => !!findVisibleCreateButton(),
+          30000, 200, 'переход на главную (F.1)'
+        );
+        if (homeOk) ok('  ✔ На главной.');
+        else warn('  ⚠ F.1: «Создать сообщение» не появилась — возможно, не на главной');
       }
+    } else {
+      warn('  ⚠ F.1: кнопка «Первая страница» не найдена');
     }
   }
 
@@ -1219,7 +1252,6 @@
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
 
-    // v1.33: перечитываем файл только если пользователь изменил стартовую строку
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
       log(`Перечитывание файла с Excel#${effectiveStart}…`);
       let info;
@@ -1250,7 +1282,6 @@
 
     log(`Старт: ${state.rows.length} строк, с Excel#${state.rows[0].excelRowNum} до #${state.rows[state.rows.length-1].excelRowNum}.`);
 
-    // v1.31: во время прогона поле «Начать со строки» превращается в счётчик
     ui.startRowLabel.textContent = 'Текущая строка Excel:';
     ui.startRow.readOnly = true;
 
@@ -1263,7 +1294,6 @@
       try {
         await transferOne(item);
         state.stats.ok++;
-        // v1.36: сохраняем имя файла + абсолютную Excel-строку
         saveState(state.fileName, item.excelRowNum);
         ok(`✅ Excel#${item.excelRowNum} — сохранено в LocalStorage`);
         state.idx++;
