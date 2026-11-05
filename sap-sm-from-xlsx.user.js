@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.40
+// @version      1.42
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -23,6 +23,11 @@
       window.__SM_NET_HOOKED__ = true;
 
       window.__SM_WAITERS__ = [];
+      window.__SM_LAST_POST_TS__ = 0;   // v1.42: timestamp последнего POST на BSPWDApplication.do
+      window.__SM_NET_IDLE_MS__ = () => {
+        if (!window.__SM_LAST_POST_TS__) return 999999;
+        return Date.now() - window.__SM_LAST_POST_TS__;
+      };
 
       function triggerWaiters(url) {
         if (!url) return;
@@ -37,13 +42,12 @@
         window.fetch = async function(...args) {
           const url = args[0] ? args[0].toString() : '';
           const response = await origFetch.apply(this, args);
+          if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
           triggerWaiters(url);
           return response;
         };
       }
 
-      // v1.40: печатаем htmlbevt_oid каждого POST — по нему видно,
-      // реально ли ушёл клик по Create/Save/Edit/Home, или кнопка была stale.
       const origSend = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.send = function(body) {
         try {
@@ -60,7 +64,9 @@
           }
         } catch (e) {}
         this.addEventListener('load', function() {
-          triggerWaiters(this.responseURL || '');
+          const url = this.responseURL || '';
+          if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
+          triggerWaiters(url);
         });
         return origSend.apply(this, arguments);
       };
@@ -218,7 +224,6 @@
     $('#sm-clear-log').addEventListener('click', () => { ui.log.innerHTML = ''; });
   })();
 
-  // v1.38: копировать лог в буфер обмена
   $('#sm-copy-log').addEventListener('click', async () => {
     const text = ui.log.textContent || '';
     if (!text) { log('Лог пуст — нечего копировать.'); return; }
@@ -399,6 +404,25 @@
     if (state.stopped) throw new SMStoppedError();
   }
 
+  // v1.42: ждём «тишины» в сети (последние idleMs мс не было POST на BSPWDApplication.do).
+  async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
+    const t0 = Date.now();
+    let lastLog = 0;
+    while (Date.now() - t0 < timeoutMs) {
+      checkStop();
+      // idle на верхнем окне — this top frame; оттуда же видно состояние из iframe через хук
+      const idle = (typeof window.__SM_NET_IDLE_MS__ === 'function') ? window.__SM_NET_IDLE_MS__() : 999999;
+      if (idle >= idleMs) return true;
+      if (Date.now() - t0 - lastLog > 3000) {
+        lastLog = Date.now() - t0;
+        dbg(`    … ждём сетевой тишины (idle=${idle} мс < ${idleMs})`);
+      }
+      await sleep(200);
+    }
+    dbg(`    ⚠ сетевой тишины не дождались за ${timeoutMs} мс`);
+    return false;
+  }
+
   function realClick(el) {
     if (!el) return;
     const win = el.ownerDocument.defaultView || window;
@@ -429,8 +453,6 @@
     const mSL = oc.match(/htmlbSL\s*\(\s*this\s*,\s*(\d+)\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
     if (mSL) {
       const [_, n, evtId, cntRaw] = mSL;
-      // v1.40: сначала нативный click() (ближе всего к реальному клику),
-      // fallback — составной realClick(mousedown+mouseup+click).
       try { btn.focus(); } catch (e) {}
       try { btn.scrollIntoView({ block: 'center' }); } catch (e) {}
       try {
@@ -524,18 +546,20 @@
     return true;
   }
 
-  // v1.38: записать value в произвольный element (не по id)
-  function setElementValue(el, value) {
+  // v1.42: fireChange по умолчанию false — не триггерим SAP autoSubmit на textarea,
+  // иначе view может «улететь» с формы, как показал лог второй итерации.
+  function setElementValue(el, value, fireChange = false) {
     if (!el) return false;
     try { el.focus(); } catch(e) {}
     el.value = value;
     try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {}
-    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+    if (fireChange) {
+      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+    }
     const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
     return norm(el.value) === norm(value);
   }
 
-  // v1.38: поиск поля решения среди нескольких кандидатов + фолбэк
   function findSolutionTextarea() {
     const tryIds = [
       'C38_W62_V63_V65_text_longtext',
@@ -572,7 +596,6 @@
     return { r: null, id: null };
   }
 
-  // v1.38: диагностика при сбоях E.1/E.2 — что видно в DOM
   function dumpDiagnostics(label) {
     const textareas = [];
     const susEls = [];
@@ -607,6 +630,10 @@
     warn(`  [diag ${label}] textareas(visible) = ${JSON.stringify(textareas)}`);
     warn(`  [diag ${label}] _SUS*/_TextAdd/_longtext = ${JSON.stringify(susEls)}`);
     warn(`  [diag ${label}] action buttons = ${JSON.stringify(actionBtns)}`);
+  }
+
+  function isIncidentFormPresent() {
+    return findInFrames('C32_W39_V41_V52_btadminh_struct.description') !== null;
   }
 
   function parseDropdownItems(itemsId) {
@@ -667,7 +694,7 @@
 
     let target = null;
     const appeared = await waitForCondition(() => {
-      const anchors = r.doc.querySelectorAll('a');
+      let anchors; try { anchors = r.doc.querySelectorAll('a'); } catch(e) { return false; }
       for (const a of anchors) {
         if (!a.offsetParent) continue;
         if ((a.textContent || '').replace(/\s+/g, ' ').trim() === label) {
@@ -990,8 +1017,6 @@
     if (!homeEl) throw new Error('Интерфейс SAP не загрузился');
     ok('  ✔ интерфейс найден');
 
-    // v1.40: если кнопка «Создать сообщение» уже видна — мы на главной,
-    // Home не кликаем (иначе он запускает reload и убивает клик по Create).
     const preBtn = findVisibleCreateButton();
     if (preBtn) {
       log('Шаг 0.2: «Первая страница» — уже на главной, Home пропускаю');
@@ -999,12 +1024,8 @@
     } else {
       log('Шаг 0.2: «Первая страница»…');
       const homeLink = findEl('C4_W16_V17_SM-SP-HOME');
-      const oldId = null; // старую кнопку мы не видели — ждём любую видимую свежую
       if (nativeSubmitButton(homeLink, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
-        const homeOk = await waitForCondition(() => {
-          const b = findVisibleCreateButton();
-          return !!b && (!oldId || b.id !== oldId);
-        }, 20000, 200, 'переход на главную (0.2)');
+        const homeOk = await waitForCondition(() => !!findVisibleCreateButton(), 20000, 200, 'переход на главную (0.2)');
         if (homeOk) ok('  ✔ «Первая страница»');
         else warn('  ⚠ 0.2: главная не загрузилась (нет «Создать сообщение»)');
       }
@@ -1026,6 +1047,10 @@
 
     log('Шаг 0.4: «Создать сообщение»…');
     await debugPause('Перед нажатием «Создать сообщение»');
+
+    // v1.42: перед кликом Create — ждём «тишины» в сети (SAP после Home иногда
+    // ещё дописывает фоновые AJAX, которые могут «съесть» наш клик по Create).
+    await waitForNetIdle(2000, 5000);
 
     nativeSubmitButton(createBtn, 'thtmlb:button:click:0', 'C28_W96_V97_CREATE', 'INCIDENT_CREATE', 0);
 
@@ -1201,7 +1226,6 @@
     const ltBefore = (findEl('C38_W62_V63_V65_text_longtext') || {}).value || '';
     realClick(solItem);
 
-    // v1.38: ждём появления textarea (с тем же id, новым id или первым видимым)
     const fieldReady = await waitForCondition(() => {
       const el = findEl('C38_W62_V63_V65_text_longtext');
       if (el && isVisible(el) && ((el.value || '') !== ltBefore)) return true;
@@ -1219,6 +1243,9 @@
       throw new Error('E.1: после «Решение» не появилось ни одной видимой textarea');
     }
     ok('  ✔ «Решение» выбрано.');
+    // v1.42: даём SAP время «устояться» после перерисовки textarea,
+    // прежде чем писать текст и кликать по дропдауну статуса.
+    await waitForNetIdle(1500, 5000);
     await debugPause('После «Решение»');
     checkStop();
 
@@ -1232,11 +1259,19 @@
     const solIdLabel = sol.id || '(no-id)';
     log(`  найдено поле: id="${solIdLabel}"`);
 
-    if (!setElementValue(sol.r.el, d.longTextSolution)) {
+    // v1.42: fireChange=false — не триггерим SAP autoSubmit, иначе view может улететь на Home.
+    if (!setElementValue(sol.r.el, d.longTextSolution, false)) {
       dumpDiagnostics('E.2-write-failed');
       throw new Error(`E.2: не удалось записать текст решения в поле "${solIdLabel}"`);
     }
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв. в "${solIdLabel}")`);
+
+    // v1.42: после записи текста даём SAP переварить input, проверяем, что мы всё ещё на форме.
+    await sleep(500);
+    if (!isIncidentFormPresent()) {
+      dumpDiagnostics('E.2-form-lost-after-text');
+      throw new Error('E.2: форма инцидента исчезла после записи текста (SAP «улётел» на Home). Инцидент создан, текст записан, статус E0005 не установлен.');
+    }
 
     log('E.2: Статус E0005...');
     const e0005InEdit = await waitForCondition(
@@ -1272,8 +1307,14 @@
     if (homeBtn) {
       if (nativeSubmitButton(homeBtn, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
         const homeOk = await waitForCondition(() => !!findVisibleCreateButton(), 30000, 200, 'переход на главную (F.1)');
-        if (homeOk) ok('  ✔ На главной.');
-        else throw new Error('F.1: «Создать сообщение» не появилась — не на главной');
+        if (homeOk) {
+          ok('  ✔ На главной.');
+          // v1.42: перед следующей итерацией — дождаться, пока SAP Home «отвиснет».
+          // Иначе фоновые AJAX от Home могут «съесть» клик по Create / перерисовать форму.
+          await waitForNetIdle(2000, 10000);
+        } else {
+          throw new Error('F.1: «Создать сообщение» не появилась — не на главной');
+        }
       }
     } else throw new Error('F.1: кнопка «Первая страница» не найдена');
   }
@@ -1366,7 +1407,8 @@
         state.stopped = true; break;
       }
       if (ui.step.checked) await waitForManual(`Строка ${state.idx} готова. Проверьте SAP и нажмите «Продолжить».`);
-      await sleep(1500);
+      // v1.42: 1500 → 3000 мс — даём SAP «выдохнуть» перед новой итерацией.
+      await sleep(3000);
     }
 
     state.running = false;
