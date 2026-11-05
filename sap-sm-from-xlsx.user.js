@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.37
+// @version      1.38
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
+// @match        https://sapsm3ci.sap.metinvest.com/*
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
 // @grant        GM_addStyle
 // @grant        GM_info
@@ -15,14 +16,11 @@
 (function () {
   'use strict';
 
-  // ==================== ПЕРЕХВАТЧИК СЕТИ ====================
   (function installNetworkHook() {
     const hookFn = function() {
       if (window.__SM_NET_HOOKED__) return;
       window.__SM_NET_HOOKED__ = true;
-
       window.__SM_WAITERS__ = [];
-
       function triggerWaiters(url) {
         if (!url) return;
         window.__SM_WAITERS__ = window.__SM_WAITERS__.filter(w => {
@@ -30,7 +28,6 @@
           return true;
         });
       }
-
       const origFetch = window.fetch;
       if (origFetch) {
         window.fetch = async function(...args) {
@@ -40,26 +37,18 @@
           return response;
         };
       }
-
       const origSend = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.send = function(...args) {
-        this.addEventListener('load', function() {
-          triggerWaiters(this.responseURL || '');
-        });
+        this.addEventListener('load', function() { triggerWaiters(this.responseURL || ''); });
         return origSend.apply(this, args);
       };
-
       window.__SM_WAIT_FOR_NET__ = function(urlPart, timeoutMs) {
         return new Promise(resolve => {
           const timer = setTimeout(() => resolve(false), timeoutMs);
-          window.__SM_WAITERS__.push({
-            urlPart: urlPart,
-            resolve: () => { clearTimeout(timer); resolve(true); }
-          });
+          window.__SM_WAITERS__.push({ urlPart, resolve: () => { clearTimeout(timer); resolve(true); } });
         });
       };
     };
-
     function inject(doc, win) {
       if (!win) return;
       try {
@@ -69,7 +58,6 @@
         script.remove();
       } catch(e) {}
     }
-
     setInterval(() => {
       (function walk(doc, win) {
         inject(doc, win);
@@ -82,7 +70,6 @@
     }, 1000);
   })();
 
-  // ==================== ДИАГНОСТИКА ====================
   (function installDiagAny() {
     window.__SM_DIAG_ANY = function() {
       const out = [];
@@ -95,8 +82,7 @@
           });
         } catch(e){}
       })(document, window, 0);
-      console.table(out);
-      return out;
+      console.table(out); return out;
     };
   })();
 
@@ -106,17 +92,13 @@
   if (document.getElementById('sm-panel')) return;
 
   const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version)
-    ? String(GM_info.script.version)
-    : 'dev';
+    ? String(GM_info.script.version) : 'dev';
 
   const CFG = {
     sheetName: 'Выполненные работы',
     col: { A_date: 0, B_priem: 1, C_start: 2, D_end: 3, E_category: 4, F_object: 5, G_fault: 6, H_works: 7, I_sapCat: 8, J_system: 9, K_exec: 10, L_dept: 11, M_comment: 12 },
     guid: { category_otherSystems: '005056A081D31EEE96A83576BCEA81C6' },
-    groups: {
-      modular: 'MODULAR Поддержка Модулар',
-      telecom: 'LGOK-Telekom ЛГОК: Связь'
-    },
+    groups: { modular: 'MODULAR Поддержка Модулар', telecom: 'LGOK-Telekom ЛГОК: Связь' },
     modularSystems: ['Modular', 'КОБУС', 'Серверное оборудование', 'Серверное программное обеспечение'],
     status: { inProgress: 'E0002', solution: 'E0005' },
     fixed: { author: 'Общий ЛГОК', handler: 'Евгений Михайлович Зиновьев' },
@@ -151,6 +133,7 @@
     <h3 id="sm-title">
       <span>SAP SM: XLSX → Incident (v${SCRIPT_VERSION})</span>
       <span class="sm-hdr-btns">
+        <button id="sm-copy-log" title="Копировать лог в буфер обмена">📋</button>
         <button id="sm-clear-log" title="Очистить лог">🗑</button>
         <button id="sm-collapse" title="Свернуть">–</button>
       </span>
@@ -201,6 +184,33 @@
     $('#sm-clear-log').addEventListener('click', () => { ui.log.innerHTML = ''; });
   })();
 
+  // v1.38: копировать лог в буфер обмена
+  $('#sm-copy-log').addEventListener('click', async () => {
+    const text = ui.log.textContent || '';
+    if (!text) { log('Лог пуст — нечего копировать.'); return; }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        log('📋 Лог скопирован в буфер обмена.');
+        return;
+      }
+      throw new Error('clipboard API недоступен');
+    } catch (e) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        const ok2 = document.execCommand('copy');
+        ta.remove();
+        if (ok2) log('📋 Лог скопирован (fallback).');
+        else log('📋 Не удалось скопировать: ' + e.message, 'color:#f88');
+      } catch (e2) {
+        log('📋 Не удалось скопировать: ' + e2.message, 'color:#f88');
+      }
+    }
+  });
+
   (function makeDraggable() {
     let dragging = false, dx = 0, dy = 0;
     ui.title.addEventListener('mousedown', (e) => {
@@ -217,26 +227,18 @@
     document.addEventListener('mouseup', () => { dragging = false; });
   })();
 
-  // ==================== ЛОГИ ====================
   function log(msg, cls='') {
     const t = new Date().toLocaleTimeString();
     const esc = String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     ui.log.insertAdjacentHTML('beforeend', `<span style="${cls}">[${t}] ${esc}\n</span>`);
     ui.log.scrollTop = ui.log.scrollHeight; console.log('[SM]', msg);
   }
-  function dbg(msg, cls='') {
-    if (!ui.verboseLog || !ui.verboseLog.checked) return;
-    log(msg, cls);
-  }
+  function dbg(msg, cls='') { if (!ui.verboseLog || !ui.verboseLog.checked) return; log(msg, cls); }
   const err  = (m) => log(m, 'color:#f88');
   const warn = (m) => log(m, 'color:#ff0');
   const ok   = (m) => log(m, 'color:#8f8');
 
-  function warnItem(m) {
-    state.stats.warn++;
-    warn(m);
-    updateStat();
-  }
+  function warnItem(m) { state.stats.warn++; warn(m); updateStat(); }
 
   function updateStat() {
     const cur = state.rows[state.idx];
@@ -267,12 +269,7 @@
     ui.cont.disabled = false;
     warn(`⏸ ПАУЗА (Действие): ${msg}. Нажмите «Продолжить».`);
     await new Promise(resolve => {
-      const finish = () => {
-        ui.cont.removeEventListener('click', onCont);
-        clearInterval(stopPoll);
-        ui.cont.disabled = true;
-        resolve();
-      };
+      const finish = () => { ui.cont.removeEventListener('click', onCont); clearInterval(stopPoll); ui.cont.disabled = true; resolve(); };
       const onCont = () => finish();
       ui.cont.addEventListener('click', onCont);
       const stopPoll = setInterval(() => { if (state.stopped) finish(); }, 200);
@@ -293,9 +290,7 @@
     }
   }
 
-  function escapeRegex(s) {
-    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
+  function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
   function findInFramesExact(id) {
     let firstMatch = null, visibleMatch = null;
@@ -351,9 +346,7 @@
   class SMStoppedError extends Error {
     constructor() { super('Остановлено пользователем'); this.name = 'SMStoppedError'; }
   }
-  function checkStop() {
-    if (state.stopped) throw new SMStoppedError();
-  }
+  function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
   function realClick(el) {
     if (!el) return;
@@ -401,8 +394,7 @@
   function formatDate(val) {
     if (!val) return '';
     let d;
-    if (val instanceof Date) d = val;
-    else d = new Date(val);
+    if (val instanceof Date) d = val; else d = new Date(val);
     if (isNaN(d.getTime())) return String(val);
     const day = String(d.getDate()).padStart(2, '0');
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -427,28 +419,16 @@
     if (isLookup) {
       el.value = value;
       try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(e){}
-
-      // F4: submitonenter идёт настоящим XHR/fetch — хук его ловит
-      const pNet = win.__SM_WAIT_FOR_NET__
-        ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000)
-        : null;
-
+      const pNet = win.__SM_WAIT_FOR_NET__ ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
       try {
         el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
         el.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
       } catch(e){}
-
       if (pNet) {
         const netOk = await pNet;
         if (!netOk) dbg(`  ⚠ lookup #${id.split('/').pop()}: POST BSPWDApplication.do не дождались`, 'color:#ff0');
       }
-
-      await waitForCondition(
-        () => el.value && !el.value.includes('отсутствует'),
-        5000, 50,
-        `F4 #${id.split('/').pop()}`
-      );
-
+      await waitForCondition(() => el.value && !el.value.includes('отсутствует'), 5000, 50, `F4 #${id.split('/').pop()}`);
       if (!el.value || el.value.includes('отсутствует')) {
         dbg(`  ⚠ lookup #${id.split('/').pop()} не выбрался (значение "${el.value}")`, 'color:#ff0');
         return false;
@@ -458,16 +438,102 @@
       el.value = value;
       try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch (e) {}
       try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-
       const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
       if (norm(el.value) !== norm(value)) {
-        dbg(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}" (SAP обрезал или не принял)`, 'color:#ff0');
+        dbg(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}"`, 'color:#ff0');
         return false;
       }
       const preview = el.value.length > 80 ? el.value.slice(0, 80) + '…' : el.value;
       dbg(`    [field] ✔ #${id.split('/').pop()} = "${String(preview).replace(/\n/g, '⏎')}"`);
     }
     return true;
+  }
+
+  // v1.38: записать value в произвольный element (не по id)
+  function setElementValue(el, value) {
+    if (!el) return false;
+    try { el.focus(); } catch(e) {}
+    el.value = value;
+    try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {}
+    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+    const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
+    return norm(el.value) === norm(value);
+  }
+
+  // v1.38: поиск поля решения среди нескольких кандидатов + фолбэк
+  function findSolutionTextarea() {
+    const tryIds = [
+      'C38_W62_V63_V65_text_longtext',
+      'C38_W62_V63_V65_text_solution_longtext',
+      'C38_W62_V63_V65_text_longtext_solution',
+      'C38_W62_V63_V65_solution_longtext'
+    ];
+    for (const id of tryIds) {
+      const r = findInFrames(id);
+      if (r && r.el && r.el.tagName === 'TEXTAREA') return { r, id };
+    }
+    // 2) любая видимая textarea с longtext/solution/text_area в id
+    let found = null;
+    walkFrames((doc, win, depth) => {
+      if (found) return;
+      let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        const id = ta.id || '';
+        if (/longtext/i.test(id) || /solution/i.test(id) || /text_?area/i.test(id)) {
+          found = { doc, win, el: ta, depth }; return;
+        }
+      }
+    });
+    if (found) return { r: found, id: found.el.id };
+    // 3) любая видимая textarea
+    walkFrames((doc, win, depth) => {
+      if (found) return;
+      let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        found = { doc, win, el: ta, depth }; return;
+      }
+    });
+    if (found) return { r: found, id: found.el.id };
+    return { r: null, id: null };
+  }
+
+  // v1.38: диагностика при сбоях E.1/E.2 — что видно в DOM
+  function dumpDiagnostics(label) {
+    const textareas = [];
+    const susEls = [];
+    const actionBtns = [];
+    walkFrames((doc, win, depth) => {
+      try {
+        const tas = doc.querySelectorAll('textarea');
+        for (const ta of tas) {
+          if (!isVisible(ta)) continue;
+          textareas.push({
+            id: ta.id || '(no-id)',
+            name: ta.name || '',
+            v: (ta.value || '').slice(0, 40),
+            depth
+          });
+        }
+        const ses = doc.querySelectorAll('[id*="_SUSO"], [id*="_SUSI"], [id*="_SUSN"], [id*="_TextAdd"], [id*="_text_longtext"]');
+        for (const el of ses) {
+          if (!isVisible(el)) continue;
+          susEls.push({ id: el.id, tag: el.tagName.toLowerCase(), depth });
+        }
+        const btns = doc.querySelectorAll('button, a');
+        for (const el of btns) {
+          if (!isVisible(el)) continue;
+          const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (/сохран|обработ|верну|назад|закры|отмен|решен/i.test(txt)) {
+            actionBtns.push({ id: el.id || '(no-id)', text: txt.slice(0, 50), depth });
+          }
+        }
+      } catch(e) {}
+    });
+    warn(`  [diag ${label}] textareas(visible) = ${JSON.stringify(textareas)}`);
+    warn(`  [diag ${label}] _SUS*/_TextAdd/_longtext = ${JSON.stringify(susEls)}`);
+    warn(`  [diag ${label}] action buttons = ${JSON.stringify(actionBtns)}`);
   }
 
   function parseDropdownItems(itemsId) {
@@ -480,24 +546,16 @@
     while ((m = re.exec(html)) !== null) {
       const key = m[1];
       const text = (m[2] || '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&minus;/g, '-')
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/\s+/g, ' ')
-        .trim();
+        .replace(/&nbsp;/g, ' ').replace(/&minus;/g, '-').replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/\s+/g, ' ').trim();
       if (!key || !text || text === ' ') continue;
       byId[key] = text;
     }
     return { byId };
   }
 
-  function getLabelByKey(itemsId, key) {
-    return parseDropdownItems(itemsId).byId[key] || null;
-  }
+  function getLabelByKey(itemsId, key) { return parseDropdownItems(itemsId).byId[key] || null; }
 
   function findGuidByNum(itemsId, num) {
     const byId = parseDropdownItems(itemsId).byId;
@@ -512,58 +570,35 @@
     const r = findInFrames(id);
     if (!r) { dbg('setDropdownByLabel: нет #' + id.split('/').pop(), 'color:#ff0'); return false; }
     const el = r.el;
-
     if (el.disabled) { dbg(`setDropdownByLabel: #${id.split('/').pop()} disabled`, 'color:#ff0'); return false; }
-
-    if ((el.value || '').trim() === label) {
-      dbg(`    [dropdown] #${id.split('/').pop()} уже = "${label}"`);
-      return true;
-    }
-
+    if ((el.value || '').trim() === label) { dbg(`    [dropdown] #${id.split('/').pop()} уже = "${label}"`); return true; }
     const btn = findEl(id + '-btn');
     if (!btn) { dbg(`setDropdownByLabel: нет #${id.split('/').pop()}-btn`, 'color:#ff0'); return false; }
-
     try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
     realClick(btn);
-
     let target = null;
     const appeared = await waitForCondition(() => {
       const anchors = r.doc.querySelectorAll('a');
       for (const a of anchors) {
         if (!a.offsetParent) continue;
-        if ((a.textContent || '').replace(/\s+/g, ' ').trim() === label) {
-          target = a;
-          return true;
-        }
+        if ((a.textContent || '').replace(/\s+/g, ' ').trim() === label) { target = a; return true; }
       }
       return false;
     }, 8000, 50, `меню "${label}"`);
-
     if (!appeared) {
-      const sample = Array.from(r.doc.querySelectorAll('a'))
-        .filter(a => a.offsetParent)
-        .slice(0, 12)
+      const sample = Array.from(r.doc.querySelectorAll('a')).filter(a => a.offsetParent).slice(0, 12)
         .map(a => JSON.stringify((a.textContent || '').trim().slice(0, 50)));
       dbg(`    [dropdown] пункт "${label}" не появился за 8 с. Видимые <A>: ${sample.join(', ')}`, 'color:#ff0');
       return false;
     }
-
     const win = r.win;
-    const pNet = win.__SM_WAIT_FOR_NET__
-      ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000)
-      : Promise.resolve(false);
-
+    const pNet = win.__SM_WAIT_FOR_NET__ ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : Promise.resolve(false);
     dbg(`    [dropdown] клик по <A>: "${(target.textContent||'').trim()}"`);
     realClick(target);
-
     const netOk = await pNet;
     if (!netOk) dbg(`    [dropdown] POST BSPWDApplication.do не дождались`, 'color:#ff0');
-
     const val = (el.value || '').trim();
-    if (val === label) {
-      dbg(`    [dropdown] ✔ #${id.split('/').pop()} = "${val}"`);
-      return true;
-    }
+    if (val === label) { dbg(`    [dropdown] ✔ #${id.split('/').pop()} = "${val}"`); return true; }
     dbg(`    [dropdown] #${id.split('/').pop()}: значение "${val}" ≠ ожидаемому "${label}"`, 'color:#ff0');
     return false;
   }
@@ -572,7 +607,7 @@
     const t0 = Date.now();
     let last = 0;
     while (Date.now() - t0 < timeoutMs) {
-        checkStop();
+      checkStop();
       try { if (fn()) return true; } catch(e){}
       if (Date.now() - t0 - last > 2000) {
         last = Date.now() - t0;
@@ -585,19 +620,9 @@
 
   async function fillLongTextWithRetries(value, attempts = 3, label = 'text') {
     for (let i = 1; i <= attempts; i++) {
-      const found = await waitForCondition(
-        () => findInFrames('C38_W62_V63_V65_text_longtext') !== null,
-        5000, 100, `${label} text_longtext (попытка ${i}/${attempts})`
-      );
-      if (!found) {
-        dbg(`  [${label}] поле text_longtext не появилось за 5 с (попытка ${i}/${attempts})`);
-        diagTextLongtext();
-        continue;
-      }
-      if (await setFieldValue('C38_W62_V63_V65_text_longtext', value)) {
-        dbg(`  [${label}] ✔ записано (попытка ${i}/${attempts})`);
-        return true;
-      }
+      const found = await waitForCondition(() => findInFrames('C38_W62_V63_V65_text_longtext') !== null, 5000, 100, `${label} text_longtext (попытка ${i}/${attempts})`);
+      if (!found) { dbg(`  [${label}] поле text_longtext не появилось за 5 с (попытка ${i}/${attempts})`); diagTextLongtext(); continue; }
+      if (await setFieldValue('C38_W62_V63_V65_text_longtext', value)) { dbg(`  [${label}] ✔ записано (попытка ${i}/${attempts})`); return true; }
       dbg(`  [${label}] setFieldValue вернул false (попытка ${i}/${attempts})`);
       await sleep(1000);
     }
@@ -626,10 +651,7 @@
       const r = findInFrames(id);
       if (r && isVisible(r.el)) return r.el;
       const elapsed = Date.now() - t0;
-      if (elapsed - lastLog > 5000) {
-        lastLog = elapsed;
-        dbg(`    … ждём ${label || '#' + id} (${Math.round(elapsed/1000)} с)`);
-      }
+      if (elapsed - lastLog > 5000) { lastLog = elapsed; dbg(`    … ждём ${label || '#' + id} (${Math.round(elapsed/1000)} с)`); }
       await sleep(300);
     }
     return null;
@@ -645,10 +667,7 @@
         const txt = (n.textContent || '').replace(/\s+/g, ' ').trim();
         if (txt === 'Создать сообщение') {
           const oc = n.getAttribute('onclick') || '';
-          if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) {
-            found = n;
-            return;
-          }
+          if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) { found = n; return; }
         }
       }
     });
@@ -656,9 +675,7 @@
   }
 
   function findTextAddButton() {
-    let el = findEl('C38_W62_V63_V65_TextAdd__SUSO')
-          || findEl('C38_W62_V63_V65_TextAdd')
-          || findEl('C38_W62_V63_V65_TextAdd__items____SUSO_btn');
+    let el = findEl('C38_W62_V63_V65_TextAdd__SUSO') || findEl('C38_W62_V63_V65_TextAdd') || findEl('C38_W62_V63_V65_TextAdd__items____SUSO_btn');
     if (el) return el;
     let found = null;
     walkFrames((doc) => {
@@ -677,25 +694,18 @@
     walkFrames((doc) => {
       if (found) return;
       const nodes = doc.querySelectorAll(sel || '*');
-      for (const n of nodes) {
-        if ((n.textContent || '').trim() === text) { found = n; return; }
-      }
+      for (const n of nodes) { if ((n.textContent || '').trim() === text) { found = n; return; } }
     });
     return found;
   }
 
-  // ==================== СОСТОЯНИЕ ====================
   const state = {
     rows: [], idx: 0, running: false, paused: false, stopped: false,
     stats: { ok: 0, warn: 0, err: 0 },
-    fileBuffer: null,
-    fileName: null,
-    parsedFrom: null,
-    lastFilledExcelRow: null,
-    totalFilled: 0
+    fileBuffer: null, fileName: null, parsedFrom: null,
+    lastFilledExcelRow: null, totalFilled: 0
   };
 
-  // ==================== ФАЙЛ: ИМЯ + LOCALSTORAGE ====================
   function loadSavedState() {
     try {
       const raw = localStorage.getItem(CFG.lsKey);
@@ -709,20 +719,12 @@
 
   function saveState(fileName, lastExcelRow) {
     if (!fileName) return;
-    try {
-      localStorage.setItem(CFG.lsKey, JSON.stringify({
-        fileName: fileName,
-        lastExcelRow: lastExcelRow
-      }));
-    } catch (e) {}
+    try { localStorage.setItem(CFG.lsKey, JSON.stringify({ fileName, lastExcelRow })); } catch (e) {}
   }
 
   function refreshSavedInfo(fileName) {
     const saved = loadSavedState();
-    if (!saved) {
-      ui.savedInfo.textContent = '';
-      return;
-    }
+    if (!saved) { ui.savedInfo.textContent = ''; return; }
     if (fileName && saved.fileName === fileName) {
       ui.savedInfo.textContent = `В LocalStorage: этот файл, последняя успешная строка Excel#${saved.lastExcelRow}.`;
     } else {
@@ -730,24 +732,14 @@
     }
   }
 
-  // ==================== ЧТЕНИЕ XLSX ====================
   function parseXlsxBuffer(buffer) {
-    const wb = XLSX.read(new Uint8Array(buffer), {
-      type: 'array',
-      cellDates: true,
-      dense: true,
-      sheets: CFG.sheetName
-    });
+    const wb = XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, dense: true, sheets: CFG.sheetName });
     const ws = wb.Sheets[CFG.sheetName];
     if (!ws) throw new Error(`Лист "${CFG.sheetName}" не найден`);
     const ref = ws['!ref'];
     if (!ref) return { allRows: [], totalFilled: 0, lastFilled: 0 };
     const range = XLSX.utils.decode_range(ref);
-
-    const aoa = XLSX.utils.sheet_to_json(ws, {
-      header: 1, defval: '', raw: false, blankrows: true
-    });
-
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: true });
     const allRows = [];
     for (let i = 0; i < aoa.length; i++) {
       const excelRowNum = range.s.r + i + 1;
@@ -767,43 +759,25 @@
 
   function filterRowsFrom(allRows, fromExcelRow) {
     const from = Math.max(1, parseInt(fromExcelRow, 10) || 1);
-    return from > 1
-      ? allRows.filter(x => x.excelRowNum >= from)
-      : allRows.slice();
+    return from > 1 ? allRows.filter(x => x.excelRowNum >= from) : allRows.slice();
   }
 
-  // ==================== ВЫБОР ФАЙЛА ====================
   ui.file.addEventListener('click', () => { ui.file.value = ''; });
 
   ui.file.addEventListener('change', async (e) => {
     const input = e.target;
     const f = input.files && input.files[0];
     if (!f) { input.value = ''; return; }
-
-    if (state.running) {
-      warn('Идёт прогон — сначала «⏹ Стоп», затем выбирайте файл.');
-      input.value = '';
-      return;
-    }
+    if (state.running) { warn('Идёт прогон — сначала «⏹ Стоп», затем выбирайте файл.'); input.value = ''; return; }
 
     ui.fileName.textContent = 'Текущий файл: ' + f.name;
 
-    try {
-      state.fileBuffer = await f.arrayBuffer();
-    } catch (ex) {
-      err('Ошибка чтения файла: ' + ex.message);
-      input.value = '';
-      return;
-    }
+    try { state.fileBuffer = await f.arrayBuffer(); }
+    catch (ex) { err('Ошибка чтения файла: ' + ex.message); input.value = ''; return; }
 
     let info;
-    try {
-      info = parseXlsxBuffer(state.fileBuffer);
-    } catch (ex) {
-      err('Ошибка чтения XLSX: ' + ex.message);
-      input.value = '';
-      return;
-    }
+    try { info = parseXlsxBuffer(state.fileBuffer); }
+    catch (ex) { err('Ошибка чтения XLSX: ' + ex.message); input.value = ''; return; }
 
     const oldName = state.fileName;
     const newName = f.name;
@@ -822,16 +796,9 @@
 
     if (!info.totalFilled) {
       warn(`Лист "${CFG.sheetName}" пуст (нет заполненных строк).`);
-      state.rows = [];
-      state.parsedFrom = null;
-      state.totalFilled = 0;
-      state.lastFilledExcelRow = 0;
-      state.idx = 0;
-      ui.prog.max = 0; ui.prog.value = 0;
-      ui.start.disabled = true;
-      refreshSavedInfo(newName);
-      input.value = '';
-      return;
+      state.rows = []; state.parsedFrom = null; state.totalFilled = 0; state.lastFilledExcelRow = 0; state.idx = 0;
+      ui.prog.max = 0; ui.prog.value = 0; ui.start.disabled = true;
+      refreshSavedInfo(newName); input.value = ''; return;
     }
 
     if (fileChanged) {
@@ -866,11 +833,9 @@
       ui.stat.textContent = `В файле заполненных: ${info.totalFilled}. Старт с Excel#${effectiveStart} — попадает за пределы данных.`;
       warn(`Нет строк для обработки: старт Excel#${effectiveStart} > последней заполненной #${info.lastFilled}.`);
     }
-
     input.value = '';
   });
 
-  // ==================== ПАРСИНГ СТРОКИ ====================
   function parseRow(cells) {
     const c = CFG.col;
     const s = (i) => String(cells[i] ?? '').trim();
@@ -880,25 +845,19 @@
     const dash = iVal.lastIndexOf('-');
     if (dash >= 0) num = iVal.substring(dash + 1).trim();
     num = num.replace(/,/g, '.');
-
     const dA = formatDate(cells[c.A_date]);
     const dD = formatDate(cells[c.D_end]);
-
     const headBefore = [dA, s(c.B_priem)].filter(Boolean).join(' ');
     const bodyBefore = [s(c.E_category), s(c.F_object), s(c.G_fault)].filter(Boolean).join(' ');
     const longTextBefore = [headBefore, bodyBefore].filter(Boolean).join('\n');
-
     const headSol = [dA, dD].filter(Boolean).join(' ');
     const worksSol = s(c.H_works);
     const execSol  = s(c.K_exec);
     const longTextSolution = [headSol, worksSol, execSol].filter(Boolean).join('\n');
-
     const system = s(c.J_system);
-
     return { desc, num, longTextBefore, longTextSolution, raw: cells, iVal, system };
   }
 
-  // ==================== ШАГ 0 ====================
   async function step0_openForm() {
     log('Шаг 0.1: ждём интерфейс SAP…');
     let homeEl = await waitForVisible('C4_W16_V17_SM-SP-HOME', 60000, '«Первая страница»');
@@ -908,11 +867,7 @@
     log('Шаг 0.2: «Первая страница»…');
     const homeLink = findEl('C4_W16_V17_SM-SP-HOME');
     if (nativeSubmitButton(homeLink, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
-      // v1.37: Home — навигация, ждём DOM-маркер (кнопка «Создать сообщение»)
-      const homeOk = await waitForCondition(
-        () => !!findVisibleCreateButton(),
-        20000, 200, 'переход на главную (0.2)'
-      );
+      const homeOk = await waitForCondition(() => !!findVisibleCreateButton(), 20000, 200, 'переход на главную (0.2)');
       if (homeOk) ok('  ✔ «Первая страница»');
       else warn('  ⚠ 0.2: главная не загрузилась (нет «Создать сообщение»)');
     }
@@ -924,98 +879,69 @@
       createBtn = findVisibleCreateButton();
       if (createBtn) break;
       const elapsed = Date.now() - t0;
-      if (elapsed > 5000 && elapsed % 5000 < 300) {
-        dbg(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
-      }
+      if (elapsed > 5000 && elapsed % 5000 < 300) dbg(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
       await sleep(300);
     }
     if (!createBtn) throw new Error('Кнопка «Создать сообщение» не появилась (искали по тексту)');
 
     log('Шаг 0.4: «Создать сообщение»…');
     await debugPause('Перед нажатием «Создать сообщение»');
-
     nativeSubmitButton(createBtn, 'thtmlb:button:click:0', 'C28_W96_V97_CREATE', 'INCIDENT_CREATE', 0);
 
-    // v1.37: маркер открытия формы — поле «Описание»
     let descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 40000, 'поле «Описание»');
     if (!descField) descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 10000, 'поле «Описание»');
     if (!descField) throw new Error('Форма не открылась');
     ok('  ✔ форма инцидента открыта');
-
     await debugPause('Форма инцидента открыта');
   }
 
-  // ==================== ОСНОВНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ ====================
   async function transferOne(item) {
     const d = parseRow(item.cells);
     if (!d.desc) d.desc = `Инцидент Excel#${item.excelRowNum}`;
-    if (!d.num) {
-      throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
-    }
+    if (!d.num) throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
     log(`▶ Excel#${item.excelRowNum}: ${d.desc} | номер="${d.num}"`);
 
     await step0_openForm();
     checkStop();
 
     log('A.1: Короткое описание (F-G, ≤40)...');
-    if (!await setFieldValue('C32_W39_V41_V52_btadminh_struct.description', d.desc)) {
-      warnItem('  ⚠ Описание не записалось');
-    }
+    if (!await setFieldValue('C32_W39_V41_V52_btadminh_struct.description', d.desc)) warnItem('  ⚠ Описание не записалось');
 
     log('A.2: Автор (F4 + Enter)...');
-    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_02', CFG.fixed.author, true)) {
-      warnItem('  ⚠ Автор не выбрался');
-    }
+    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_02', CFG.fixed.author, true)) warnItem('  ⚠ Автор не выбрался');
 
     log('A.3: Обработчик (F4 + Enter)...');
-    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_04', CFG.fixed.handler, true)) {
-      warnItem('  ⚠ Обработчик не выбрался');
-    }
+    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_04', CFG.fixed.handler, true)) warnItem('  ⚠ Обработчик не выбрался');
 
     log('A.4: Длинный текст "до" (text_longtext)...');
     let okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'A.4');
-    if (!okLongBefore) {
-      warnItem('  ⚠ длинный текст "до" не записался после 3 попыток — попробуем после Обработать');
-    }
+    if (!okLongBefore) warnItem('  ⚠ длинный текст "до" не записался после 3 попыток');
     await debugPause('После A.1-A.4');
     checkStop();
 
     log('B.1: Категории (dropdown)...');
     const grpNum = d.num.split('.')[0];
-
     const cat01Id = 'C34_W56_V57_btcategoryfirst_cat01';
     const cat01Label = getLabelByKey(cat01Id + '__items', CFG.guid.category_otherSystems);
     if (cat01Label) {
       if (!await setDropdownByLabel(cat01Id, cat01Label)) warnItem(`  ⚠ cat01 не выбрался ("${cat01Label}")`);
-    } else {
-      warnItem(`  ⚠ cat01: label для GUID ${CFG.guid.category_otherSystems} не найден в __items`);
-    }
+    } else warnItem(`  ⚠ cat01: label для GUID ${CFG.guid.category_otherSystems} не найден в __items`);
 
     const cat02Id = 'C34_W56_V57_btcategoryfirst_cat02';
     const cat02Guid = findGuidByNum(cat02Id + '__items', grpNum);
     if (cat02Guid) {
       const cat02Label = getLabelByKey(cat02Id + '__items', cat02Guid);
-      if (cat02Label) {
-        if (!await setDropdownByLabel(cat02Id, cat02Label)) warnItem(`  ⚠ cat02 не выбрался ("${cat02Label}")`);
-      } else {
-        warnItem(`  ⚠ cat02: label для GUID ${cat02Guid} не найден`);
-      }
-    } else {
-      warnItem(`  ⚠ cat02 для группы "${grpNum}" не найден в __items`);
-    }
+      if (cat02Label) { if (!await setDropdownByLabel(cat02Id, cat02Label)) warnItem(`  ⚠ cat02 не выбрался ("${cat02Label}")`); }
+      else warnItem(`  ⚠ cat02: label для GUID ${cat02Guid} не найден`);
+    } else warnItem(`  ⚠ cat02 для группы "${grpNum}" не найден в __items`);
 
     const cat03Id = 'C34_W56_V57_btcategoryfirst_cat03';
     const cat03Guid = findGuidByNum(cat03Id + '__items', d.num);
     if (cat03Guid) {
       const cat03Label = getLabelByKey(cat03Id + '__items', cat03Guid);
-      if (cat03Label) {
-        if (!await setDropdownByLabel(cat03Id, cat03Label)) warnItem(`  ⚠ cat03 не выбрался ("${cat03Label}")`);
-      } else {
-        warnItem(`  ⚠ cat03: label для GUID ${cat03Guid} не найден`);
-      }
-    } else {
-      warnItem(`  ⚠ cat03 для "${d.num}" не найден в __items`);
-    }
+      if (cat03Label) { if (!await setDropdownByLabel(cat03Id, cat03Label)) warnItem(`  ⚠ cat03 не выбрался ("${cat03Label}")`); }
+      else warnItem(`  ⚠ cat03: label для GUID ${cat03Guid} не найден`);
+    } else warnItem(`  ⚠ cat03 для "${d.num}" не найден в __items`);
     await debugPause('После Категорий');
     checkStop();
 
@@ -1024,55 +950,40 @@
     const isModular = CFG.modularSystems.some(x => x.toLowerCase() === sysNorm);
     const groupLabel = isModular ? CFG.groups.modular : CFG.groups.telecom;
     log(`  Система (J) = "${d.system || '—'}" → Группа = "${groupLabel}"`);
-    const okGroup = await setDropdownByLabel(
-      'C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_03',
-      groupLabel
-    );
-    if (!okGroup) {
-      err('  ✖ Группа не выбралась. Сохранение прервётся (SAP не даст создать инцидент без группы).');
-      throw new Error('Группа поддержки не выбралась');
-    }
+    const okGroup = await setDropdownByLabel('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_03', groupLabel);
+    if (!okGroup) { err('  ✖ Группа не выбралась. Сохранение прервётся.'); throw new Error('Группа поддержки не выбралась'); }
     await debugPause('После Группы поддержки');
     checkStop();
 
     log('B.3: Статус «В обработке» (E0002) — dropdown...');
     const stId = 'C32_W39_V41_V52_btadminh_lcstatus';
     const stLabel = getLabelByKey(stId + '__items', CFG.status.inProgress);
-    if (stLabel) {
-      if (!await setDropdownByLabel(stId, stLabel)) warnItem(`  ⚠ статус E0002 не выбрался ("${stLabel}")`);
-    } else {
-      warnItem(`  ⚠ статус E0002 не найден в __items`);
-    }
+    if (stLabel) { if (!await setDropdownByLabel(stId, stLabel)) warnItem(`  ⚠ статус E0002 не выбрался ("${stLabel}")`); }
+    else warnItem(`  ⚠ статус E0002 не найден в __items`);
     await debugPause('После Статуса E0002');
     checkStop();
 
-    // ---------- C.1: Сохранить (создание) ----------
     log('C.1: Сохранить (создание инцидента)...');
     let saveBtn = findEl('C32_W39_V41_SAVE');
     if (!saveBtn) throw new Error('Нет кнопки «Сохранить» (C.1)');
     if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
-    // v1.37: SAVE — навигация (не AJAX). Ждём DOM-маркер view-режима — кнопку «Обработать».
     const editAppeared = await waitForCondition(
       () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
-      40000, 200, 'перезагрузка после SAVE (C.1)'
-    );
+      40000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1): форма не вернулась');
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
     checkStop();
 
-    // ---------- C.2: Обработать ----------
     log('C.2: «Обработать»...');
     const editBtn = findEl('C32_W39_V41_EDIT');
     if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
     if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
       throw new Error('Не могу нажать «Обработать» (C.2)');
-    // v1.37: EDIT — навигация. Маркер edit-режима — появление E0005 в __items статуса.
     const e0005Ready = await waitForCondition(
       () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
-      40000, 200, 'E0005 в __items после EDIT (C.2)'
-    );
+      40000, 200, 'E0005 в __items после EDIT (C.2)');
     if (!e0005Ready) {
       const items = parseDropdownItems(stId + '__items').byId;
       dbg(`    [diag] __items статуса после EDIT: ${JSON.stringify(items).slice(0, 400)}`);
@@ -1082,7 +993,6 @@
     await debugPause('После «Обработать»');
     checkStop();
 
-    // ---------- C.3: Fallback — длинный текст "до" (если A.4 не справился) ----------
     if (!okLongBefore) {
       log('C.3: Fallback — длинный текст "до" после Обработать...');
       okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'C.3');
@@ -1091,21 +1001,17 @@
         const saveBtn3 = findEl('C32_W39_V41_SAVE');
         if (saveBtn3) {
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
-            // v1.37: ждём появления EDIT (вернулись в view-режим)
             const back = await waitForCondition(
               () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
-              20000, 200, 'перезагрузка после SAVE (C.3)'
-            );
+              20000, 200, 'перезагрузка после SAVE (C.3)');
             if (back) ok('  ✔ "До" сохранено (fallback).');
             else warn('  ⚠ C.3: после SAVE не появилась кнопка «Обработать»');
           }
         }
-      } else {
-        warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
-      }
+      } else warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
     }
 
-    // ---------- E.1: Добавить текст → Решение ----------
+    // ============ E.1: Добавить текст → Решение ============
     log('E.1: «Добавить текст» → «Решение»...');
     const menuBtn = findTextAddButton();
     if (!menuBtn) throw new Error('Кнопка «Добавить текст» не найдена');
@@ -1113,107 +1019,101 @@
 
     const solItem = await waitForSolutionMenuItem(menuBtn, CFG.textAddTimeoutMs);
     checkStop();
-    if (!solItem) {
-      throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
-    }
+    if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
 
-    // Запоминаем предыдущее значение text_longtext, чтобы отличить «SAP очистил» от «поле исчезло»
     const ltBefore = (findEl('C38_W62_V63_V65_text_longtext') || {}).value || '';
-
     realClick(solItem);
-    // v1.37: после выбора «Решение» SAP перерисовывает text_longtext (обычно очищает).
-    // Маркер — поле существует и его значение изменилось (стало пустым или другим).
-    const ltChanged = await waitForCondition(
-      () => {
-        const el = findEl('C38_W62_V63_V65_text_longtext');
-        if (!el) return false;
-        const v = el.value || '';
-        return v !== ltBefore;
-      },
-      15000, 200, 'перерисовка text_longtext после «Решение»'
-    );
-    if (!ltChanged) warn('  ⚠ E.1: text_longtext не перерисовался после «Решение» (продолжаем)');
+
+    // v1.38: ждём появления textarea (с тем же id, новым id или первым видимым)
+    const fieldReady = await waitForCondition(() => {
+      const el = findEl('C38_W62_V63_V65_text_longtext');
+      if (el && isVisible(el) && ((el.value || '') !== ltBefore)) return true;
+      // любая видимая textarea
+      let any = false;
+      walkFrames((doc) => {
+        if (any) return;
+        let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
+        for (const t of tas) { if (isVisible(t)) { any = true; return; } }
+      });
+      return any;
+    }, 25000, 200, 'появление textarea после «Решение»');
+
+    if (!fieldReady) {
+      dumpDiagnostics('E.1-no-textarea');
+      throw new Error('E.1: после «Решение» не появилось ни одной видимой textarea');
+    }
     ok('  ✔ «Решение» выбрано.');
     await debugPause('После «Решение»');
     checkStop();
 
-    // ---------- E.2: Текст решения + Статус E0005 ----------
-    log('E.2: Текст решения + Статус E0005...');
-    if (!await setFieldValue('C38_W62_V63_V65_text_longtext', d.longTextSolution)) {
-      warnItem('  ⚠ текст решения не записался');
+    // ============ E.2: Текст решения + Статус E0005 ============
+    log('E.2: Текст решения...');
+    const sol = findSolutionTextarea();
+    if (!sol.r) {
+      dumpDiagnostics('E.2-no-solution-field');
+      throw new Error('E.2: не найдено поле для текста решения (text_longtext и альтернативы отсутствуют)');
     }
+    const solIdLabel = sol.id || '(no-id)';
+    log(`  найдено поле: id="${solIdLabel}"`);
 
-    // v1.37: E0005 уже должен быть (проверено в C.2), но подождём ещё 5 с на всякий случай
-    await waitForCondition(
+    if (!setElementValue(sol.r.el, d.longTextSolution)) {
+      dumpDiagnostics('E.2-write-failed');
+      throw new Error(`E.2: не удалось записать текст решения в поле "${solIdLabel}"`);
+    }
+    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв. в "${solIdLabel}")`);
+
+    log('E.2: Статус E0005...');
+    const e0005InEdit = await waitForCondition(
       () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
-      5000, 200, 'E0005 в __items (E.2)'
-    );
-    const stLabel2 = getLabelByKey(stId + '__items', CFG.status.solution);
-    if (stLabel2) {
-      if (!await setDropdownByLabel(stId, stLabel2)) warnItem(`  ⚠ статус E0005 не выбрался ("${stLabel2}")`);
-    } else {
+      10000, 200, 'E0005 в __items (E.2)');
+    if (!e0005InEdit) {
       const items = parseDropdownItems(stId + '__items').byId;
-      warnItem(`  ⚠ статус E0005 не найден в __items — статус не изменится`);
-      dbg(`    [diag] __items статуса (E.2): ${JSON.stringify(items).slice(0, 400)}`);
+      const keys = Object.keys(items);
+      dumpDiagnostics('E.2-no-E0005');
+      throw new Error(`E.2: статус E0005 не найден в __items (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
     }
+    const stLabel2 = getLabelByKey(stId + '__items', CFG.status.solution);
+    if (!await setDropdownByLabel(stId, stLabel2)) {
+      throw new Error(`E.2: не удалось установить статус "${stLabel2}"`);
+    }
+    ok('  ✔ Статус E0005 установлен.');
 
-    // ---------- E.3: Сохранить (решение) ----------
     log('E.3: Сохранить (решение)...');
     const saveBtn2 = findEl('C32_W39_V41_SAVE');
     if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
     if (!nativeSubmitButton(saveBtn2, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (E.3)');
-    // v1.37: после SAVE решения возвращаемся в view-режим (кнопка «Обработать»)
     const backView = await waitForCondition(
       () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
-      30000, 200, 'перезагрузка после SAVE (E.3)'
-    );
-    if (!backView) warn('  ⚠ E.3: после SAVE не появилась кнопка «Обработать»');
+      30000, 200, 'перезагрузка после SAVE (E.3)');
+    if (!backView) throw new Error('E.3: после SAVE не появилась кнопка «Обработать» — SAVE не применился');
     ok('  ✔ Решение записано.');
     await debugPause('После сохранения решения');
     checkStop();
 
-    // ---------- F.1: Home ----------
     log('F.1: «Первая страница»...');
     const homeBtn = findEl('C4_W16_V17_SM-SP-HOME');
     if (homeBtn) {
       if (nativeSubmitButton(homeBtn, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
-        // v1.37: маркер перехода на главную — кнопка «Создать сообщение»
-        const homeOk = await waitForCondition(
-          () => !!findVisibleCreateButton(),
-          30000, 200, 'переход на главную (F.1)'
-        );
+        const homeOk = await waitForCondition(() => !!findVisibleCreateButton(), 30000, 200, 'переход на главную (F.1)');
         if (homeOk) ok('  ✔ На главной.');
-        else warn('  ⚠ F.1: «Создать сообщение» не появилась — возможно, не на главной');
+        else throw new Error('F.1: «Создать сообщение» не появилась — не на главной');
       }
-    } else {
-      warn('  ⚠ F.1: кнопка «Первая страница» не найдена');
-    }
+    } else throw new Error('F.1: кнопка «Первая страница» не найдена');
   }
 
   async function waitForSolutionMenuItem(menuBtn, timeoutMs) {
     const SOL_ID = 'C38_W62_V63_V65_TextAdd__items____SUSO';
     const t0 = Date.now();
-    let lastClick = 0;
-    let lastLog = 0;
-
+    let lastClick = 0, lastLog = 0;
     realClick(menuBtn);
     lastClick = Date.now();
-
     while (Date.now() - t0 < timeoutMs) {
-        checkStop();
+      checkStop();
       const sol = findEl(SOL_ID);
       if (sol && sol.offsetParent) return sol;
-
-      if (Date.now() - lastClick > 2000) {
-        realClick(menuBtn);
-        lastClick = Date.now();
-      }
-
-      if (Date.now() - t0 - lastLog > 5000) {
-        lastLog = Date.now() - t0;
-        dbg(`    … ждём пункт «Решение» (${Math.round(lastLog/1000)} с)`);
-      }
+      if (Date.now() - lastClick > 2000) { realClick(menuBtn); lastClick = Date.now(); }
+      if (Date.now() - t0 - lastLog > 5000) { lastLog = Date.now() - t0; dbg(`    … ждём пункт «Решение» (${Math.round(lastLog/1000)} с)`); }
       await sleep(200);
     }
     return null;
@@ -1224,12 +1124,7 @@
     ui.cont.disabled = false;
     warn('⏸ ' + msg);
     await new Promise(resolve => {
-      const finish = () => {
-        ui.cont.removeEventListener('click', onCont);
-        clearInterval(stopPoll);
-        ui.cont.disabled = true;
-        resolve();
-      };
+      const finish = () => { ui.cont.removeEventListener('click', onCont); clearInterval(stopPoll); ui.cont.disabled = true; resolve(); };
       const onCont = () => finish();
       ui.cont.addEventListener('click', onCont);
       const stopPoll = setInterval(() => { if (state.stopped) finish(); }, 200);
@@ -1237,31 +1132,20 @@
     checkStop();
   }
 
-  // ==================== ЦИКЛ ====================
   async function runLoop() {
     state.running = true; state.stopped = false; state.paused = false;
     state.stats = { ok: 0, warn: 0, err: 0 };
     ui.start.disabled = true; ui.pause.disabled = false; ui.stop.disabled = false;
     ui.pause.textContent = '⏸ Пауза';
 
-    if (!state.fileBuffer) {
-      err('Файл не выбран.');
-      state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
-      return;
-    }
+    if (!state.fileBuffer) { err('Файл не выбран.'); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return; }
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
-
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
       log(`Перечитывание файла с Excel#${effectiveStart}…`);
       let info;
-      try {
-        info = parseXlsxBuffer(state.fileBuffer);
-      } catch (ex) {
-        err('Ошибка перечитывания: ' + ex.message);
-        state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
-        return;
-      }
+      try { info = parseXlsxBuffer(state.fileBuffer); }
+      catch (ex) { err('Ошибка перечитывания: ' + ex.message); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return; }
       state.rows = filterRowsFrom(info.allRows, effectiveStart);
       state.parsedFrom = effectiveStart;
       state.totalFilled = info.totalFilled;
@@ -1271,15 +1155,12 @@
       ui.prog.value = 0;
       log(`Загружено ${state.rows.length} строк (Excel#${effectiveStart}..#${info.lastFilled}).`);
     }
-
     if (state.rows.length === 0) {
       err(`Нет строк для обработки (старт Excel#${effectiveStart}, последняя заполненная #${state.lastFilledExcelRow}).`);
-      state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
-      return;
+      state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return;
     }
 
     state.idx = 0;
-
     log(`Старт: ${state.rows.length} строк, с Excel#${state.rows[0].excelRowNum} до #${state.rows[state.rows.length-1].excelRowNum}.`);
 
     ui.startRowLabel.textContent = 'Текущая строка Excel:';
@@ -1301,31 +1182,25 @@
       } catch (e) {
         if (e && e.name === 'SMStoppedError') {
           warn(`⏹ Остановлено пользователем на Excel#${item.excelRowNum}`);
-          state.stopped = true;
-          break;
+          state.stopped = true; break;
         }
         state.stats.err++;
         updateStat();
         err(`✖ [${state.idx + 1}] ${e.message}. Останов.`);
-        state.stopped = true;
-        break;
+        state.stopped = true; break;
       }
-      if (ui.step.checked) {
-        await waitForManual(`Строка ${state.idx} готова. Проверьте SAP и нажмите «Продолжить».`);
-      }
+      if (ui.step.checked) await waitForManual(`Строка ${state.idx} готова. Проверьте SAP и нажмите «Продолжить».`);
       await sleep(1500);
     }
 
     state.running = false;
     ui.startRowLabel.textContent = 'Начать со строки:';
     ui.startRow.readOnly = false;
-
     ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
     ui.pause.textContent = '⏸ Пауза';
     log(state.stopped
       ? `⏹ Остановлено — ✅ ${state.stats.ok} / ⚠ ${state.stats.warn} / ✖ ${state.stats.err}`
       : `✅ Готово — ✅ ${state.stats.ok} / ⚠ ${state.stats.warn} / ✖ ${state.stats.err}`);
-
     refreshSavedInfo(state.fileName);
   }
 
@@ -1341,9 +1216,7 @@
       const curExcel = state.rows[state.idx].excelRowNum;
       ui.startRow.value = curExcel;
       log(`⏹ Стоп → «Начать со строки» = ${curExcel} (Excel#${curExcel})`);
-    } else {
-      log('⏹ Стоп');
-    }
+    } else log('⏹ Стоп');
   });
 
   log(`Скрипт загружен (v${SCRIPT_VERSION}). Выберите XLSX-файл.`);
