@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.38
+// @version      1.39
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -376,13 +376,16 @@
     }
 
     const mSL = oc.match(/htmlbSL\s*\(\s*this\s*,\s*(\d+)\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/);
-    if (mSL && typeof win.htmlbSL === 'function') {
+    if (mSL) {
+      // v1.39: htmlbSL при прямом вызове НЕ инициирует POST —
+      // он полагается на htmlbevent, устанавливаемый браузером при реальном клике.
+      // Используем realClick: браузер сам вызовет onclick кнопки в правильном контексте,
+      // htmlbSL внутри onclick отработает и отправит POST.
       const [_, n, evtId, cntRaw] = mSL;
-      try {
-        win.htmlbSL(btn, parseInt(n, 10), unesc(evtId), unesc(cntRaw));
-        dbg(`    [nativeSubmit] htmlbSL: ${evtId} | n=${n} | cnt=${cntRaw}`);
-        return true;
-      } catch (e) { dbg('[nativeSubmit] htmlbSL error: ' + e.message, 'color:#ff0'); }
+      try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
+      realClick(btn);
+      dbg(`    [nativeSubmit] realClick(btn) for htmlbSL: ${oid} | ${evtId} | n=${n}`);
+      return true;
     }
 
     try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
