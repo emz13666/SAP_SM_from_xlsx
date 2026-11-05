@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.46
+// @version      1.47
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -48,30 +48,30 @@
         };
       }
 
-const origSend = XMLHttpRequest.prototype.send;
-XMLHttpRequest.prototype.send = function(body) {
-  const isSapPost = body && typeof body === 'string' && body.indexOf('htmlbevt_oid') >= 0;
-  try {
-    if (isSapPost) {
-      const mOid = body.match(/htmlbevt_oid=([^&]+)/);
-      const mTy  = body.match(/htmlbevt_ty=([^&]+)/);
-      const mId  = body.match(/htmlbevt_id=([^&]+)/);
-      if (mOid) {
-        console.log('[SM][net] POST',
-          'ty=' + decodeURIComponent(mTy ? mTy[1] : ''),
-          'oid=' + decodeURIComponent(mOid[1]),
-          'id='  + decodeURIComponent(mId ? mId[1] : ''));
-      }
-    }
-  } catch (e) {}
-  if (isSapPost) window.__SM_LAST_POST_TS__ = Date.now();  // ← v1.46: на старте POST
-  this.addEventListener('load', function() {
-    const url = this.responseURL || '';
-    if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
-    triggerWaiters(url);
-  });
-  return origSend.apply(this, arguments);
-};
+      const origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function(body) {
+        const isSapPost = body && typeof body === 'string' && body.indexOf('htmlbevt_oid') >= 0;
+        try {
+          if (isSapPost) {
+            const mOid = body.match(/htmlbevt_oid=([^&]+)/);
+            const mTy  = body.match(/htmlbevt_ty=([^&]+)/);
+            const mId  = body.match(/htmlbevt_id=([^&]+)/);
+            if (mOid) {
+              console.log('[SM][net] POST',
+                'ty=' + decodeURIComponent(mTy ? mTy[1] : ''),
+                'oid=' + decodeURIComponent(mOid[1]),
+                'id='  + decodeURIComponent(mId ? mId[1] : ''));
+            }
+          }
+        } catch (e) {}
+        if (isSapPost) window.__SM_LAST_POST_TS__ = Date.now(); // v1.46
+        this.addEventListener('load', function() {
+          const url = this.responseURL || '';
+          if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
+          triggerWaiters(url);
+        });
+        return origSend.apply(this, arguments);
+      };
 
       window.__SM_WAIT_FOR_NET__ = function(urlPart, timeoutMs) {
         return new Promise(resolve => {
@@ -372,51 +372,90 @@ XMLHttpRequest.prototype.send = function(body) {
   }
 
   function findEl(id) { const r = findInFrames(id); return r ? r.el : null; }
-// v1.46: поиск id только в конкретном документе (не по всем фреймам).
-function findInDoc(doc, id) {
-  if (!doc) return null;
-  try { const el = doc.getElementById(id); if (el) return el; } catch (e) {}
-  const stripped = String(id).replace(/^C\d+(?:_[WV]\d+)+_/, '');
-  if (stripped === id) return null;
-  const re = new RegExp('^C\\d+(?:_[WV]\\d+)+_' + escapeRegex(stripped) + '$');
-  let all; try { all = doc.querySelectorAll('[id]'); } catch (e) { return null; }
-  for (const el of all) if (re.test(el.id)) return el;
-  return null;
-}
 
-// v1.46: документ текущей формы — определяем по видимому полю «Описание».
-function getFormDoc() {
-  const r = findInFrames('C32_W39_V41_V52_btadminh_struct.description');
-  return (r && r.el && isVisible(r.el)) ? r.doc : null;
-}
-
-// v1.46: parse __items внутри конкретного документа.
-function parseDropdownItemsInDoc(doc, itemsId) {
-  const byId = {};
-  if (!doc) return { byId };
-  const el = findInDoc(doc, itemsId);
-  if (!el) return { byId };
-  const html = el.innerHTML || '';
-  const re = /a\["([^"]+)"\]\s*=\s*"([^"]*)"/g;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const key = m[1];
-    const text = (m[2] || '')
-      .replace(/&nbsp;/g, ' ').replace(/&minus;/g, '-').replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-      .replace(/\s+/g, ' ').trim();
-    if (!key || !text || text === ' ') continue;
-    byId[key] = text;
+  // ==================== v1.47: ХЕЛПЕРЫ ТЕКУЩЕГО ФРЕЙМА ====================
+  
+  // Поиск по id только в конкретном документе (без обхода фреймов)
+  function findInDoc(doc, id) {
+    if (!doc) return null;
+    try { const el = doc.getElementById(id); if (el) return el; } catch (e) {}
+    const stripped = String(id).replace(/^C\d+(?:_[WV]\d+)+_/, '');
+    if (stripped === id) return null;
+    const re = new RegExp('^C\\d+(?:_[WV]\\d+)+_' + escapeRegex(stripped) + '$');
+    let all; try { all = doc.querySelectorAll('[id]'); } catch (e) { return null; }
+    for (const el of all) if (re.test(el.id)) return el;
+    return null;
   }
-  return { byId };
-}
 
-// v1.46: label из __items ТОЛЬКО текущей формы (игнор stale-фреймов).
-function getLabelInFormFrame(itemsId, key) {
-  const doc = getFormDoc();
-  if (!doc) return null;
-  return parseDropdownItemsInDoc(doc, itemsId).byId[key] || null;
-}
+  // Поиск актуального документа формы инцидента по ожидаемому описанию
+  function getFormDoc(expectedDesc) {
+    if (expectedDesc === undefined) expectedDesc = state.currentDesc;
+    let bestDoc = null;
+    let bestScore = -1;
+
+    walkFrames((doc, win, depth) => {
+      if (win && win.frameElement) {
+        try {
+          const rect = win.frameElement.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return; // игнорируем скрытые iframe
+        } catch (e) { return; }
+      }
+
+      const descEl = findInDoc(doc, 'C32_W39_V41_V52_btadminh_struct.description');
+      if (!descEl || !isVisible(descEl)) return;
+
+      if (expectedDesc) {
+        const v = String(descEl.value || '').trim();
+        const exp = String(expectedDesc).trim();
+        if (!v || !exp) return;
+        const n = Math.min(15, exp.length);
+        if (v.substring(0, n) !== exp.substring(0, n)) return;
+      }
+
+      let score = 1;
+      const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
+      const saveBtn = findInDoc(doc, 'C32_W39_V41_SAVE');
+      if (editBtn && isVisible(editBtn)) score++;
+      if (saveBtn && isVisible(saveBtn)) score++;
+      if (findInDoc(doc, 'C32_W39_V41_V52_btadminh_lcstatus')) score++;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDoc = doc;
+      }
+    });
+    return bestDoc;
+  }
+
+  // Парсинг __items в конкретном документе
+  function parseDropdownItemsInDoc(doc, itemsId) {
+    const byId = {};
+    if (!doc) return { byId };
+    const el = findInDoc(doc, itemsId);
+    if (!el) return { byId };
+    const html = el.innerHTML || '';
+    const re = /a\["([^"]+)"\]\s*=\s*"([^"]*)"/g;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const key = m[1];
+      const text = (m[2] || '')
+        .replace(/&nbsp;/g, ' ').replace(/&minus;/g, '-').replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/\s+/g, ' ').trim();
+      if (!key || !text || text === ' ') continue;
+      byId[key] = text;
+    }
+    return { byId };
+  }
+
+  // Получение label из __items текущей формы
+  function getLabelInFormFrame(itemsId, key, expectedDesc) {
+    const doc = getFormDoc(expectedDesc);
+    if (!doc) return null;
+    return parseDropdownItemsInDoc(doc, itemsId).byId[key] || null;
+  }
+  // ========================================================================
+
   function isVisible(el) {
     if (!el) return false;
     try {
@@ -434,30 +473,31 @@ function getLabelInFormFrame(itemsId, key) {
   }
   function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
-async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
-  const t0 = Date.now();
-  let lastLog = 0;
-  while (Date.now() - t0 < timeoutMs) {
-    checkStop();
-    let minIdle = 999999;
-    walkFrames((doc, win) => {
-      try {
-        if (win && typeof win.__SM_NET_IDLE_MS__ === 'function') {
-          const idle = win.__SM_NET_IDLE_MS__();
-          if (typeof idle === 'number' && idle < minIdle) minIdle = idle;
-        }
-      } catch (e) {}
-    });
-    if (minIdle >= idleMs) return true;
-    if (Date.now() - t0 - lastLog > 3000) {
-      lastLog = Date.now() - t0;
-      dbg(`    … ждём сетевой тишины (minIdle=${minIdle} мс < ${idleMs})`);
+  async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
+    const t0 = Date.now();
+    let lastLog = 0;
+    while (Date.now() - t0 < timeoutMs) {
+      checkStop();
+      let minIdle = 999999;
+      walkFrames((doc, win) => {
+        try {
+          if (win && typeof win.__SM_NET_IDLE_MS__ === 'function') {
+            const idle = win.__SM_NET_IDLE_MS__();
+            if (typeof idle === 'number' && idle < minIdle) minIdle = idle;
+          }
+        } catch (e) {}
+      });
+      
+      if (minIdle >= idleMs) return true;
+      if (Date.now() - t0 - lastLog > 3000) {
+        lastLog = Date.now() - t0;
+        dbg(`    … ждём сетевой тишины (minIdle=${minIdle} мс < ${idleMs})`);
+      }
+      await sleep(200);
     }
-    await sleep(200);
+    dbg(`    ⚠ сетевой тишины не дождались за ${timeoutMs} мс`);
+    return false;
   }
-  dbg(`    ⚠ сетевой тишины не дождались за ${timeoutMs} мс`);
-  return false;
-}
 
   function realClick(el) {
     if (!el) return;
@@ -578,8 +618,6 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     return true;
   }
 
-  // v1.44: fireInput/fireChange по умолчанию false — на textarea решения SAP
-  // не должен получать input/change, иначе autoSubmit улетает на Home.
   function setElementValue(el, value, fireInput = false, fireChange = false) {
     if (!el) return false;
     try { el.focus(); } catch(e) {}
@@ -590,7 +628,18 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     return norm(el.value) === norm(value);
   }
 
-  function findSolutionTextarea() {
+  function findSolutionTextarea(preferredDoc) {
+    if (preferredDoc) {
+      let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_text_longtext');
+      if (el && el.tagName === 'TEXTAREA' && isVisible(el)) return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
+      let tas = preferredDoc.querySelectorAll('textarea');
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        const id = ta.id || '';
+        if (/longtext/i.test(id) || /solution/i.test(id)) return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el: ta, depth: 0 }, id: ta.id };
+      }
+    }
+
     const tryIds = [
       'C38_W62_V63_V65_text_longtext',
       'C38_W62_V63_V65_text_solution_longtext',
@@ -655,8 +704,6 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     warn(`  [diag ${label}] action buttons = ${JSON.stringify(actionBtns)}`);
   }
 
-  // v1.44: только visible (в отличие от isIncidentFormPresent v1.42,
-  // который мог дать false-positive из скрытого фрейма).
   function isIncidentFormVisible() {
     const r = findInFrames('C32_W39_V41_V52_btadminh_struct.description');
     return !!(r && isVisible(r.el));
@@ -692,8 +739,15 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     return null;
   }
 
-  async function setDropdownByLabel(id, label) {
-    const r = findInFrames(id);
+  async function setDropdownByLabel(id, label, preferredDoc) {
+    let r;
+    if (preferredDoc) {
+      const el = findInDoc(preferredDoc, id);
+      if (!el) { dbg(`setDropdownByLabel: нет #${id.split('/').pop()} в formDoc`, 'color:#ff0'); return false; }
+      r = { doc: preferredDoc, el, win: preferredDoc.defaultView, depth: 0 };
+    } else {
+      r = findInFrames(id);
+    }
     if (!r) { dbg('setDropdownByLabel: нет #' + id.split('/').pop(), 'color:#ff0'); return false; }
     const el = r.el;
 
@@ -704,7 +758,7 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
       return true;
     }
 
-    const btn = findEl(id + '-btn');
+    const btn = preferredDoc ? findInDoc(preferredDoc, id + '-btn') : findEl(id + '-btn');
     if (!btn) { dbg(`setDropdownByLabel: нет #${id.split('/').pop()}-btn`, 'color:#ff0'); return false; }
 
     if (!isVisible(btn)) {
@@ -827,7 +881,20 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     return found;
   }
 
-  function findTextAddButton() {
+  function findTextAddButton(preferredDoc) {
+    if (preferredDoc) {
+      let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_TextAdd__SUSO')
+            || findInDoc(preferredDoc, 'C38_W62_V63_V65_TextAdd')
+            || findInDoc(preferredDoc, 'C38_W62_V63_V65_TextAdd__items____SUSO_btn');
+      if (el) return el;
+      const nodes = preferredDoc.querySelectorAll('[onclick*="thtmlbDynamenuCreate"], [onmousedown*="thtmlbDynamenuCreate"]');
+      for (const n of nodes) {
+        if (/TextAdd/i.test(n.getAttribute('onclick') || n.getAttribute('onmousedown') || '')) return n;
+      }
+      const spans = preferredDoc.querySelectorAll('a,button,span');
+      for (const n of spans) if ((n.textContent || '').trim() === 'Добавить текст') return n;
+    }
+
     let el = findEl('C38_W62_V63_V65_TextAdd__SUSO')
           || findEl('C38_W62_V63_V65_TextAdd')
           || findEl('C38_W62_V63_V65_TextAdd__items____SUSO_btn');
@@ -860,7 +927,8 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     stats: { ok: 0, warn: 0, err: 0 },
     fileBuffer: null, fileName: null, parsedFrom: null,
     lastFilledExcelRow: null, totalFilled: 0,
-    allRows: null
+    allRows: null,
+    currentDesc: '' // v1.47: ожидаемое описание текущего инцидента
   };
 
   function loadSavedState() {
@@ -929,12 +997,9 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     try { state.fileBuffer = await f.arrayBuffer(); }
     catch (ex) { err('Ошибка чтения файла: ' + ex.message); input.value = ''; return; }
 
-    // v1.45: показываем, что читаем файл — иначе на 16 500 строк
-    // parseXlsxBuffer блокирует main thread на ~6 с, кнопка «Старт»
-    // выглядит активной, хотя по факту уже disabled.
     ui.start.textContent = '▶ Чтение файла…';
     log('Читаю файл…');
-    await sleep(50); // даём браузеру отрисовать статус
+    await sleep(50);
 
     let info;
     try { info = parseXlsxBuffer(state.fileBuffer); }
@@ -945,7 +1010,6 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
       return;
     }
 
-    // v1.45: кэшируем — на «Старте» при смене startRow не будем парсить заново
     state.allRows = info.allRows;
     ui.start.textContent = '▶ Старт';
 
@@ -1080,6 +1144,7 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
   async function transferOne(item) {
     const d = parseRow(item.cells);
     if (!d.desc) d.desc = `Инцидент Excel#${item.excelRowNum}`;
+    state.currentDesc = d.desc; // v1.47
     if (!d.num) throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
     log(`▶ Excel#${item.excelRowNum}: ${d.desc} | номер="${d.num}"`);
 
@@ -1146,40 +1211,62 @@ async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     checkStop();
 
     log('C.1: Сохранить (создание инцидента)...');
-    let saveBtn = findEl('C32_W39_V41_SAVE');
+    const formDocC1 = getFormDoc(state.currentDesc);
+    let saveBtn = formDocC1 ? findInDoc(formDocC1, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
     if (!saveBtn) throw new Error('Нет кнопки «Сохранить» (C.1)');
     if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
+    
+    // Ждем перехода в режим просмотра (появление кнопки «Обработать»)
     const editAppeared = await waitForCondition(
-      () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
-      40000, 200, 'перезагрузка после SAVE (C.1)');
+      () => {
+        const doc = getFormDoc(state.currentDesc);
+        if (!doc) return false;
+        const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+        return btn && isVisible(btn);
+      }, 40000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
     checkStop();
 
-log('C.2: «Обработать»...');
-const formDocC2 = getFormDoc();
-let editBtn = formDocC2 ? findInDoc(formDocC2, 'C32_W39_V41_EDIT') : null;
-if (!editBtn) editBtn = findEl('C32_W39_V41_EDIT');
-if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
-if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
-  throw new Error('Не могу нажать «Обработать» (C.2)');
+    // ============ C.2: «Обработать» ============
+    log('C.2: «Обработать»...');
+    const formDocC2 = getFormDoc(state.currentDesc);
+    if (!formDocC2) throw new Error('C.2: текущая форма не найдена');
+    
+    let editBtn = findInDoc(formDocC2, 'C32_W39_V41_EDIT');
+    if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
 
-// v1.46: дождаться, пока EDIT-POST завершится и форма перерисуется в edit-mode.
-await waitForNetIdle(500, 30000);
+    // v1.47: дожидаемся, пока SAP навесит обработчик onclick (иначе realClick не сработает)
+    await waitForCondition(() => {
+        const oc = editBtn.getAttribute('onclick') || '';
+        return oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit');
+    }, 10000, 100, 'EDIT button interactive');
 
-// v1.46: E0005 ищем ТОЛЬКО в текущей форме (не в stale-фрейме).
-const e0005Ready = await waitForCondition(
-  () => getLabelInFormFrame(stId + '__items', CFG.status.solution) !== null,
-  40000, 200, 'E0005 в __items после EDIT (C.2)');
-if (!e0005Ready) {
-  const doc = getFormDoc();
-  const items = doc ? parseDropdownItemsInDoc(doc, stId + '__items').byId : {};
-  dbg(`    [diag] __items после EDIT (форма): ${JSON.stringify(items).slice(0, 400)}`);
-  throw new Error('После EDIT в __items не появился E0005');
-}
-ok('  ✔ Режим редактирования.');
+    if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
+      throw new Error('Не могу нажать «Обработать» (C.2)');
+
+    // v1.47: главный маркер edit-mode — появление кнопки SAVE (Сохранить)
+    const editReady = await waitForCondition(() => {
+        const doc = getFormDoc(state.currentDesc);
+        if (!doc) return false;
+        const saveBtn = findInDoc(doc, 'C32_W39_V41_SAVE');
+        return saveBtn && isVisible(saveBtn);
+    }, 30000, 200, 'SAVE button visible (edit mode)');
+
+    if (!editReady) throw new Error('C.2: форма не перешла в edit-mode (нет кнопки SAVE)');
+
+    // Проверяем E0005 строго в этом фрейме
+    const formDocC2b = getFormDoc(state.currentDesc);
+    const e0005Ready = formDocC2b &&
+      parseDropdownItemsInDoc(formDocC2b, stId + '__items').byId[CFG.status.solution];
+    if (!e0005Ready) {
+      const items = formDocC2b ? parseDropdownItemsInDoc(formDocC2b, stId + '__items').byId : {};
+      dbg(`    [diag] __items после EDIT (форма): ${JSON.stringify(items).slice(0, 400)}`);
+      throw new Error('После EDIT в __items не появился E0005');
+    }
+    ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
     checkStop();
 
@@ -1188,7 +1275,8 @@ ok('  ✔ Режим редактирования.');
       okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'C.3');
       if (okLongBefore) {
         log('C.3: сохраняем "до" перед Решением...');
-        const saveBtn3 = findEl('C32_W39_V41_SAVE');
+        const formDocC3 = getFormDoc(state.currentDesc);
+        const saveBtn3 = formDocC3 ? findInDoc(formDocC3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
         if (saveBtn3) {
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
             const back = await waitForCondition(
@@ -1203,99 +1291,105 @@ ok('  ✔ Режим редактирования.');
 
     // ============ E.1: Добавить текст → Решение ============
     log('E.1: «Добавить текст» → «Решение»...');
-    const menuBtn = findTextAddButton();
+    const formDocE1 = getFormDoc(state.currentDesc);
+    if (!formDocE1) throw new Error('E.1: текущая форма не найдена');
+
+    const menuBtn = findTextAddButton(formDocE1);
     if (!menuBtn) throw new Error('Кнопка «Добавить текст» не найдена');
     try { menuBtn.scrollIntoView({ block: 'center' }); } catch(e) {}
 
-    const solItem = await waitForSolutionMenuItem(menuBtn, CFG.textAddTimeoutMs);
+    const solItem = await waitForSolutionMenuItem(menuBtn, CFG.textAddTimeoutMs, formDocE1);
     checkStop();
     if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
 
     realClick(solItem);
 
     const fieldReady = await waitForCondition(() => {
-      const s = findSolutionTextarea();
+      const s = findSolutionTextarea(formDocE1);
       return s.r && isVisible(s.r.el);
     }, 25000, 200, 'появление textarea после «Решение»');
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
       throw new Error('E.1: после «Решение» не появилось textarea');
     }
-ok('  ✔ «Решение» выбрано.');
-await waitForNetIdle(500, 15000);   // v1.46: ADDTEXT-POST должен улечься
-await debugPause('После «Решение»');
+    ok('  ✔ «Решение» выбрано.');
+    await waitForNetIdle(500, 15000); // v1.46
+    await debugPause('После «Решение»');
     checkStop();
 
-    // ============ E.2: Текст решения (без событий!) ============
+    // ============ E.2: Текст решения ============
     log('E.2: Текст решения...');
-    const sol = findSolutionTextarea();
+    const formDocE2 = getFormDoc(state.currentDesc);
+    let sol = findSolutionTextarea(formDocE2);
     if (!sol.r) {
       dumpDiagnostics('E.2-no-solution-field');
       throw new Error('E.2: не найдено поле для текста решения');
     }
     log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
 
-    // v1.44: НИКАКИХ input/change — только el.value = value.
-    // SAP увидит изменение только при SAVE. Иначе autoSubmit улетает на Home.
     if (!setElementValue(sol.r.el, d.longTextSolution, false, false)) {
       dumpDiagnostics('E.2-write-failed');
       throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
     }
-log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
-await waitForNetIdle(300, 5000);    // v1.46: страховка перед E.2b
+    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
+    await waitForNetIdle(300, 5000); // v1.46
 
-    // v1.44: проверка видимости формы перед кликом по статусу.
     if (!isIncidentFormVisible()) {
       dumpDiagnostics('E.2-form-lost-after-text');
       throw new Error('E.2: форма инцидента не видна после записи текста — SAP «улетел» на Home. Текст записан, статус E0005 не установлен.');
     }
 
     // ============ E.2b: Статус E0005 ============
-log('E.2b: Статус E0005...');
-// v1.46: не кликаем, пока EDIT-форма не устоялась.
-await waitForNetIdle(500, 15000);
+    log('E.2b: Статус E0005...');
+    await waitForNetIdle(500, 15000); // v1.46
 
-{
-  const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
-  if (r) {
-    dbg(`    [E.2b] status-dropdown: visible=${isVisible(r.el)} value="${r.el.value}" doc-title="${r.doc.title}"`);
-  } else {
-    warn('  ⚠ E.2b: дропдаун статуса не найден');
-  }
-}
+    {
+      const formDocE2b = getFormDoc(state.currentDesc);
+      if (formDocE2b) {
+        const statusInput = findInDoc(formDocE2b, 'C32_W39_V41_V52_btadminh_lcstatus');
+        dbg(`    [E.2b] status-dropdown: visible=${isVisible(statusInput)} value="${statusInput ? statusInput.value : ''}"`);
+      } else {
+        warn('  ⚠ E.2b: форма не найдена');
+      }
+    }
 
-const e0005InEdit = await waitForCondition(
-  () => getLabelInFormFrame(stId + '__items', CFG.status.solution) !== null,
-  10000, 200, 'E0005 в __items (E.2b)');
-if (!e0005InEdit) {
-  const doc = getFormDoc();
-  const items = doc ? parseDropdownItemsInDoc(doc, stId + '__items').byId : {};
-  const keys = Object.keys(items);
-  dumpDiagnostics('E.2b-no-E0005');
-  throw new Error(`E.2b: статус E0005 не найден в __items текущей формы (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
-}
-const stLabel2 = getLabelInFormFrame(stId + '__items', CFG.status.solution);
-if (!stLabel2) throw new Error('E.2b: не удалось получить label для E0005');
-if (!await setDropdownByLabel(stId, stLabel2)) {
-  if (!isIncidentFormVisible()) {
-    dumpDiagnostics('E.2b-form-lost-during-dropdown');
-    throw new Error('E.2b: форма исчезла во время клика по статусу E0005');
-  }
-  throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
-}
-ok('  ✔ Статус E0005 установлен.');
+    const formDocE2b = getFormDoc(state.currentDesc);
+    if (!formDocE2b) throw new Error('E.2b: текущая форма не найдена');
+    
+    const stLabel2 = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId[CFG.status.solution];
+    if (!stLabel2) {
+      const items = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId;
+      const keys = Object.keys(items);
+      dumpDiagnostics('E.2b-no-E0005');
+      throw new Error(`E.2b: E0005 нет в __items текущей формы (есть: ${keys.length ? keys.join(',') : 'ничего'})`);
+    }
+
+    if (!await setDropdownByLabel(stId, stLabel2, formDocE2b)) {
+      if (!isIncidentFormVisible()) {
+        dumpDiagnostics('E.2b-form-lost-during-dropdown');
+        throw new Error('E.2b: форма исчезла во время клика по статусу E0005');
+      }
+      throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
+    }
+    ok('  ✔ Статус E0005 установлен.');
     await debugPause('После E0005');
     checkStop();
 
     // ============ E.3: SAVE ============
     log('E.3: Сохранить (решение)...');
-    const saveBtn2 = findEl('C32_W39_V41_SAVE');
+    const formDocE3 = getFormDoc(state.currentDesc);
+    const saveBtn2 = formDocE3 ? findInDoc(formDocE3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
     if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
     if (!nativeSubmitButton(saveBtn2, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (E.3)');
+    
     const backView = await waitForCondition(
-      () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
-      30000, 200, 'перезагрузка после SAVE (E.3)');
+      () => {
+        const doc = getFormDoc(state.currentDesc);
+        if (!doc) return false;
+        const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+        return btn && isVisible(btn);
+      }, 30000, 200, 'перезагрузка после SAVE (E.3)');
     if (!backView) throw new Error('E.3: после SAVE не появилась кнопка «Обработать» — SAVE не применился');
     ok('  ✔ Решение записано.');
     await debugPause('После сохранения решения');
@@ -1314,7 +1408,7 @@ ok('  ✔ Статус E0005 установлен.');
     } else throw new Error('F.1: кнопка «Первая страница» не найдена');
   }
 
-  async function waitForSolutionMenuItem(menuBtn, timeoutMs) {
+  async function waitForSolutionMenuItem(menuBtn, timeoutMs, preferredDoc) {
     const SOL_ID = 'C38_W62_V63_V65_TextAdd__items____SUSO';
     const t0 = Date.now();
     let lastClick = 0, lastLog = 0;
@@ -1322,7 +1416,7 @@ ok('  ✔ Статус E0005 установлен.');
     lastClick = Date.now();
     while (Date.now() - t0 < timeoutMs) {
       checkStop();
-      const sol = findEl(SOL_ID);
+      const sol = preferredDoc ? findInDoc(preferredDoc, SOL_ID) : findEl(SOL_ID);
       if (sol && sol.offsetParent) return sol;
       if (Date.now() - lastClick > 2000) { realClick(menuBtn); lastClick = Date.now(); }
       if (Date.now() - t0 - lastLog > 5000) { lastLog = Date.now() - t0; dbg(`    … ждём пункт «Решение» (${Math.round(lastLog/1000)} с)`); }
@@ -1352,17 +1446,12 @@ ok('  ✔ Статус E0005 установлен.');
 
     if (!state.fileBuffer) { err('Файл не выбран.'); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return; }
 
-    // v1.45: даём браузеру перерисовать disabled-состояние кнопок
-    // (иначе при последующей работе кажется, что Старт не сработал).
     await sleep(50);
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
 
-    // v1.45: при изменении startRow — только фильтр из кэша, БЕЗ re-parse.
-    // Парсинг уже был при выборе файла; повторный занимал ещё ~6 с.
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
       if (!state.allRows) {
-        // fallback — если кэша почему-то нет
         log(`Читаю файл (кэш пуст)…`);
         ui.start.textContent = '▶ Чтение файла…';
         await sleep(50);
@@ -1379,7 +1468,6 @@ ok('  ✔ Статус E0005 установлен.');
         state.lastFilledExcelRow = info.lastFilled;
         ui.start.textContent = '▶ Старт';
       }
-      // быстрая фильтрация по startRow (~10 мс)
       state.rows = filterRowsFrom(state.allRows, effectiveStart);
       state.parsedFrom = effectiveStart;
       state.idx = 0;
@@ -1400,7 +1488,6 @@ ok('  ✔ Статус E0005 установлен.');
 
     while (state.idx < state.rows.length && !state.stopped) {
       if (state.paused) { await sleep(300); continue; }
-      // v1.44: перед итерацией — добить остаточные AJAX от предыдущего Home
       await waitForNetIdle(2000, 5000);
       checkStop();
 
