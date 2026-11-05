@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.43
+// @version      1.45
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -23,7 +23,7 @@
       window.__SM_NET_HOOKED__ = true;
 
       window.__SM_WAITERS__ = [];
-      window.__SM_LAST_POST_TS__ = 0;   // v1.42: timestamp последнего POST на BSPWDApplication.do
+      window.__SM_LAST_POST_TS__ = 0;
       window.__SM_NET_IDLE_MS__ = () => {
         if (!window.__SM_LAST_POST_TS__) return 999999;
         return Date.now() - window.__SM_LAST_POST_TS__;
@@ -135,10 +135,7 @@
     sheetName: 'Выполненные работы',
     col: { A_date: 0, B_priem: 1, C_start: 2, D_end: 3, E_category: 4, F_object: 5, G_fault: 6, H_works: 7, I_sapCat: 8, J_system: 9, K_exec: 10, L_dept: 11, M_comment: 12 },
     guid: { category_otherSystems: '005056A081D31EEE96A83576BCEA81C6' },
-    groups: {
-      modular: 'MODULAR Поддержка Модулар',
-      telecom: 'LGOK-Telekom ЛГОК: Связь'
-    },
+    groups: { modular: 'MODULAR Поддержка Модулар', telecom: 'LGOK-Telekom ЛГОК: Связь' },
     modularSystems: ['Modular', 'КОБУС', 'Серверное оборудование', 'Серверное программное обеспечение'],
     status: { inProgress: 'E0002', solution: 'E0005' },
     fixed: { author: 'Общий ЛГОК', handler: 'Евгений Михайлович Зиновьев' },
@@ -281,11 +278,7 @@
   const warn = (m) => log(m, 'color:#ff0');
   const ok   = (m) => log(m, 'color:#8f8');
 
-  function warnItem(m) {
-    state.stats.warn++;
-    warn(m);
-    updateStat();
-  }
+  function warnItem(m) { state.stats.warn++; warn(m); updateStat(); }
 
   function updateStat() {
     const cur = state.rows[state.idx];
@@ -316,12 +309,7 @@
     ui.cont.disabled = false;
     warn(`⏸ ПАУЗА (Действие): ${msg}. Нажмите «Продолжить».`);
     await new Promise(resolve => {
-      const finish = () => {
-        ui.cont.removeEventListener('click', onCont);
-        clearInterval(stopPoll);
-        ui.cont.disabled = true;
-        resolve();
-      };
+      const finish = () => { ui.cont.removeEventListener('click', onCont); clearInterval(stopPoll); ui.cont.disabled = true; resolve(); };
       const onCont = () => finish();
       ui.cont.addEventListener('click', onCont);
       const stopPoll = setInterval(() => { if (state.stopped) finish(); }, 200);
@@ -342,9 +330,7 @@
     }
   }
 
-  function escapeRegex(s) {
-    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
+  function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
   function findInFramesExact(id) {
     let firstMatch = null, visibleMatch = null;
@@ -400,17 +386,13 @@
   class SMStoppedError extends Error {
     constructor() { super('Остановлено пользователем'); this.name = 'SMStoppedError'; }
   }
-  function checkStop() {
-    if (state.stopped) throw new SMStoppedError();
-  }
+  function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
-  // v1.42: ждём «тишины» в сети (последние idleMs мс не было POST на BSPWDApplication.do).
   async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
     const t0 = Date.now();
     let lastLog = 0;
     while (Date.now() - t0 < timeoutMs) {
       checkStop();
-      // idle на верхнем окне — this top frame; оттуда же видно состояние из iframe через хук
       const idle = (typeof window.__SM_NET_IDLE_MS__ === 'function') ? window.__SM_NET_IDLE_MS__() : 999999;
       if (idle >= idleMs) return true;
       if (Date.now() - t0 - lastLog > 3000) {
@@ -478,8 +460,7 @@
   function formatDate(val) {
     if (!val) return '';
     let d;
-    if (val instanceof Date) d = val;
-    else d = new Date(val);
+    if (val instanceof Date) d = val; else d = new Date(val);
     if (isNaN(d.getTime())) return String(val);
     const day = String(d.getDate()).padStart(2, '0');
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -506,8 +487,7 @@
       try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch(e){}
 
       const pNet = win.__SM_WAIT_FOR_NET__
-        ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000)
-        : null;
+        ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : null;
 
       try {
         el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
@@ -516,14 +496,12 @@
 
       if (pNet) {
         const netOk = await pNet;
-        if (!netOk) dbg(`  ⚠ lookup #${id.split('/').pop()}: POST BSPWDApplication.do не дождались`, 'color:#ff0');
+        if (!netOk) dbg(`  ⚠ lookup #${id.split('/').pop()}: POST не дождались`, 'color:#ff0');
       }
 
       await waitForCondition(
         () => el.value && !el.value.includes('отсутствует'),
-        5000, 50,
-        `F4 #${id.split('/').pop()}`
-      );
+        5000, 50, `F4 #${id.split('/').pop()}`);
 
       if (!el.value || el.value.includes('отсутствует')) {
         dbg(`  ⚠ lookup #${id.split('/').pop()} не выбрался (значение "${el.value}")`, 'color:#ff0');
@@ -537,7 +515,7 @@
 
       const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
       if (norm(el.value) !== norm(value)) {
-        dbg(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}" (SAP обрезал или не принял)`, 'color:#ff0');
+        dbg(`  ⚠ #${id.split('/').pop()}: записано "${norm(el.value).slice(0,60)}", ожидалось "${norm(value).slice(0,60)}"`, 'color:#ff0');
         return false;
       }
       const preview = el.value.length > 80 ? el.value.slice(0, 80) + '…' : el.value;
@@ -546,16 +524,14 @@
     return true;
   }
 
-  // v1.42: fireChange по умолчанию false — не триггерим SAP autoSubmit на textarea,
-  // иначе view может «улететь» с формы, как показал лог второй итерации.
-  function setElementValue(el, value, fireChange = false) {
+  // v1.44: fireInput/fireChange по умолчанию false — на textarea решения SAP
+  // не должен получать input/change, иначе autoSubmit улетает на Home.
+  function setElementValue(el, value, fireInput = false, fireChange = false) {
     if (!el) return false;
     try { el.focus(); } catch(e) {}
     el.value = value;
-    try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {}
-    if (fireChange) {
-      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
-    }
+    if (fireInput)  { try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {} }
+    if (fireChange) { try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {} }
     const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
     return norm(el.value) === norm(value);
   }
@@ -597,20 +573,13 @@
   }
 
   function dumpDiagnostics(label) {
-    const textareas = [];
-    const susEls = [];
-    const actionBtns = [];
+    const textareas = [], susEls = [], actionBtns = [];
     walkFrames((doc, win, depth) => {
       try {
         const tas = doc.querySelectorAll('textarea');
         for (const ta of tas) {
           if (!isVisible(ta)) continue;
-          textareas.push({
-            id: ta.id || '(no-id)',
-            name: ta.name || '',
-            v: (ta.value || '').slice(0, 40),
-            depth
-          });
+          textareas.push({ id: ta.id || '(no-id)', v: (ta.value || '').slice(0, 40), depth });
         }
         const ses = doc.querySelectorAll('[id*="_SUSO"], [id*="_SUSI"], [id*="_SUSN"], [id*="_TextAdd"], [id*="_text_longtext"]');
         for (const el of ses) {
@@ -632,8 +601,11 @@
     warn(`  [diag ${label}] action buttons = ${JSON.stringify(actionBtns)}`);
   }
 
-  function isIncidentFormPresent() {
-    return findInFrames('C32_W39_V41_V52_btadminh_struct.description') !== null;
+  // v1.44: только visible (в отличие от isIncidentFormPresent v1.42,
+  // который мог дать false-positive из скрытого фрейма).
+  function isIncidentFormVisible() {
+    const r = findInFrames('C32_W39_V41_V52_btadminh_struct.description');
+    return !!(r && isVisible(r.el));
   }
 
   function parseDropdownItems(itemsId) {
@@ -646,24 +618,16 @@
     while ((m = re.exec(html)) !== null) {
       const key = m[1];
       const text = (m[2] || '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&minus;/g, '-')
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/\s+/g, ' ')
-        .trim();
+        .replace(/&nbsp;/g, ' ').replace(/&minus;/g, '-').replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/\s+/g, ' ').trim();
       if (!key || !text || text === ' ') continue;
       byId[key] = text;
     }
     return { byId };
   }
 
-  function getLabelByKey(itemsId, key) {
-    return parseDropdownItems(itemsId).byId[key] || null;
-  }
+  function getLabelByKey(itemsId, key) { return parseDropdownItems(itemsId).byId[key] || null; }
 
   function findGuidByNum(itemsId, num) {
     const byId = parseDropdownItems(itemsId).byId;
@@ -689,6 +653,11 @@
     const btn = findEl(id + '-btn');
     if (!btn) { dbg(`setDropdownByLabel: нет #${id.split('/').pop()}-btn`, 'color:#ff0'); return false; }
 
+    if (!isVisible(btn)) {
+      dbg(`setDropdownByLabel: #${id.split('/').pop()}-btn существует но НЕВИДИМ (форма улетела?)`, 'color:#ff0');
+      return false;
+    }
+
     try { btn.scrollIntoView({ block: 'center' }); } catch(e) {}
     realClick(btn);
 
@@ -697,27 +666,21 @@
       let anchors; try { anchors = r.doc.querySelectorAll('a'); } catch(e) { return false; }
       for (const a of anchors) {
         if (!a.offsetParent) continue;
-        if ((a.textContent || '').replace(/\s+/g, ' ').trim() === label) {
-          target = a;
-          return true;
-        }
+        if ((a.textContent || '').replace(/\s+/g, ' ').trim() === label) { target = a; return true; }
       }
       return false;
     }, 8000, 50, `меню "${label}"`);
 
     if (!appeared) {
-      const sample = Array.from(r.doc.querySelectorAll('a'))
-        .filter(a => a.offsetParent)
-        .slice(0, 12)
-        .map(a => JSON.stringify((a.textContent || '').trim().slice(0, 50)));
+      const sample = Array.from(r.doc.querySelectorAll('a')).filter(a => a.offsetParent)
+        .slice(0, 12).map(a => JSON.stringify((a.textContent || '').trim().slice(0, 50)));
       dbg(`    [dropdown] пункт "${label}" не появился за 8 с. Видимые <A>: ${sample.join(', ')}`, 'color:#ff0');
       return false;
     }
 
     const win = r.win;
     const pNet = win.__SM_WAIT_FOR_NET__
-      ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000)
-      : Promise.resolve(false);
+      ? win.__SM_WAIT_FOR_NET__('BSPWDApplication.do', 15000) : Promise.resolve(false);
 
     dbg(`    [dropdown] клик по <A>: "${(target.textContent||'').trim()}"`);
     realClick(target);
@@ -738,7 +701,7 @@
     const t0 = Date.now();
     let last = 0;
     while (Date.now() - t0 < timeoutMs) {
-        checkStop();
+      checkStop();
       try { if (fn()) return true; } catch(e){}
       if (Date.now() - t0 - last > 2000) {
         last = Date.now() - t0;
@@ -753,13 +716,8 @@
     for (let i = 1; i <= attempts; i++) {
       const found = await waitForCondition(
         () => findInFrames('C38_W62_V63_V65_text_longtext') !== null,
-        5000, 100, `${label} text_longtext (попытка ${i}/${attempts})`
-      );
-      if (!found) {
-        dbg(`  [${label}] поле text_longtext не появилось за 5 с (попытка ${i}/${attempts})`);
-        diagTextLongtext();
-        continue;
-      }
+        5000, 100, `${label} text_longtext (попытка ${i}/${attempts})`);
+      if (!found) { dbg(`  [${label}] поле не появилось за 5 с`); diagTextLongtext(); continue; }
       if (await setFieldValue('C38_W62_V63_V65_text_longtext', value)) {
         dbg(`  [${label}] ✔ записано (попытка ${i}/${attempts})`);
         return true;
@@ -775,14 +733,11 @@
     walkFrames((doc) => {
       try {
         const all = doc.querySelectorAll('[id^="C38_W62_V63_V65_"]');
-        for (const el of all) {
-          const type = el.getAttribute('type');
-          parts.push(`${el.id}(${el.tagName.toLowerCase()}${type ? ':'+type : ''})`);
-        }
+        for (const el of all) parts.push(el.id);
       } catch(e) {}
     });
-    if (parts.length) dbg(`    [diag] C38_W62_V63_V65_* : ${parts.slice(0, 15).join(' | ')}${parts.length > 15 ? ` … (всего ${parts.length})` : ''}`);
-    else dbg(`    [diag] нет ни одного C38_W62_V63_V65_* в DOM`);
+    if (parts.length) dbg(`    [diag] C38_* : ${parts.slice(0, 15).join(' | ')}`);
+    else dbg(`    [diag] нет ни одного C38_* в DOM`);
   }
 
   async function waitForVisible(id, timeoutMs = 60000, label = '') {
@@ -811,10 +766,7 @@
         const txt = (n.textContent || '').replace(/\s+/g, ' ').trim();
         if (txt === 'Создать сообщение') {
           const oc = n.getAttribute('onclick') || '';
-          if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) {
-            found = n;
-            return;
-          }
+          if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) { found = n; return; }
         }
       }
     });
@@ -843,9 +795,7 @@
     walkFrames((doc) => {
       if (found) return;
       const nodes = doc.querySelectorAll(sel || '*');
-      for (const n of nodes) {
-        if ((n.textContent || '').trim() === text) { found = n; return; }
-      }
+      for (const n of nodes) if ((n.textContent || '').trim() === text) { found = n; return; }
     });
     return found;
   }
@@ -855,7 +805,8 @@
     rows: [], idx: 0, running: false, paused: false, stopped: false,
     stats: { ok: 0, warn: 0, err: 0 },
     fileBuffer: null, fileName: null, parsedFrom: null,
-    lastFilledExcelRow: null, totalFilled: 0
+    lastFilledExcelRow: null, totalFilled: 0,
+    allRows: null
   };
 
   function loadSavedState() {
@@ -863,8 +814,7 @@
       const raw = localStorage.getItem(CFG.lsKey);
       if (!raw) return null;
       const obj = JSON.parse(raw);
-      if (!obj || typeof obj !== 'object') return null;
-      if (!obj.fileName) return null;
+      if (!obj || typeof obj !== 'object' || !obj.fileName) return null;
       return obj;
     } catch (e) { return null; }
   }
@@ -898,9 +848,7 @@
       if (excelRowNum === 1) continue;
       const r = aoa[i];
       let hasData = false;
-      for (let c = 0; c <= CFG.col.K_exec; c++) {
-        if (String(r[c] ?? '').trim()) { hasData = true; break; }
-      }
+      for (let c = 0; c <= CFG.col.K_exec; c++) if (String(r[c] ?? '').trim()) { hasData = true; break; }
       if (!hasData) continue;
       allRows.push({ excelRowNum, cells: r });
     }
@@ -927,9 +875,25 @@
     try { state.fileBuffer = await f.arrayBuffer(); }
     catch (ex) { err('Ошибка чтения файла: ' + ex.message); input.value = ''; return; }
 
+    // v1.45: показываем, что читаем файл — иначе на 16 500 строк
+    // parseXlsxBuffer блокирует main thread на ~6 с, кнопка «Старт»
+    // выглядит активной, хотя по факту уже disabled.
+    ui.start.textContent = '▶ Чтение файла…';
+    log('Читаю файл…');
+    await sleep(50); // даём браузеру отрисовать статус
+
     let info;
     try { info = parseXlsxBuffer(state.fileBuffer); }
-    catch (ex) { err('Ошибка чтения XLSX: ' + ex.message); input.value = ''; return; }
+    catch (ex) {
+      ui.start.textContent = '▶ Старт';
+      err('Ошибка чтения XLSX: ' + ex.message);
+      input.value = '';
+      return;
+    }
+
+    // v1.45: кэшируем — на «Старте» при смене startRow не будем парсить заново
+    state.allRows = info.allRows;
+    ui.start.textContent = '▶ Старт';
 
     const oldName = state.fileName;
     const newName = f.name;
@@ -1027,7 +991,7 @@
       if (nativeSubmitButton(homeLink, 'htmlb:link:click:0', 'C4_W16_V17_SM-SP-HOME', 'SM-SPHO-WC', 0)) {
         const homeOk = await waitForCondition(() => !!findVisibleCreateButton(), 20000, 200, 'переход на главную (0.2)');
         if (homeOk) ok('  ✔ «Первая страница»');
-        else warn('  ⚠ 0.2: главная не загрузилась (нет «Создать сообщение»)');
+        else warn('  ⚠ 0.2: главная не загрузилась');
       }
     }
 
@@ -1038,9 +1002,7 @@
       createBtn = findVisibleCreateButton();
       if (createBtn) break;
       const elapsed = Date.now() - t0;
-      if (elapsed > 5000 && elapsed % 5000 < 300) {
-        dbg(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
-      }
+      if (elapsed > 5000 && elapsed % 5000 < 300) dbg(`    … ждём «Создать сообщение» (${Math.round(elapsed/1000)} с)`);
       await sleep(300);
     }
     if (!createBtn) throw new Error('Кнопка «Создать сообщение» не появилась (искали по тексту)');
@@ -1048,8 +1010,6 @@
     log('Шаг 0.4: «Создать сообщение»…');
     await debugPause('Перед нажатием «Создать сообщение»');
 
-    // v1.42: перед кликом Create — ждём «тишины» в сети (SAP после Home иногда
-    // ещё дописывает фоновые AJAX, которые могут «съесть» наш клик по Create).
     await waitForNetIdle(2000, 5000);
 
     nativeSubmitButton(createBtn, 'thtmlb:button:click:0', 'C28_W96_V97_CREATE', 'INCIDENT_CREATE', 0);
@@ -1066,34 +1026,24 @@
   async function transferOne(item) {
     const d = parseRow(item.cells);
     if (!d.desc) d.desc = `Инцидент Excel#${item.excelRowNum}`;
-    if (!d.num) {
-      throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
-    }
+    if (!d.num) throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
     log(`▶ Excel#${item.excelRowNum}: ${d.desc} | номер="${d.num}"`);
 
     await step0_openForm();
     checkStop();
 
     log('A.1: Короткое описание (F-G, ≤40)...');
-    if (!await setFieldValue('C32_W39_V41_V52_btadminh_struct.description', d.desc)) {
-      warnItem('  ⚠ Описание не записалось');
-    }
+    if (!await setFieldValue('C32_W39_V41_V52_btadminh_struct.description', d.desc)) warnItem('  ⚠ Описание не записалось');
 
     log('A.2: Автор (F4 + Enter)...');
-    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_02', CFG.fixed.author, true)) {
-      warnItem('  ⚠ Автор не выбрался');
-    }
+    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_02', CFG.fixed.author, true)) warnItem('  ⚠ Автор не выбрался');
 
     log('A.3: Обработчик (F4 + Enter)...');
-    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_04', CFG.fixed.handler, true)) {
-      warnItem('  ⚠ Обработчик не выбрался');
-    }
+    if (!await setFieldValue('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_04', CFG.fixed.handler, true)) warnItem('  ⚠ Обработчик не выбрался');
 
     log('A.4: Длинный текст "до" (text_longtext)...');
     let okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'A.4');
-    if (!okLongBefore) {
-      warnItem('  ⚠ длинный текст "до" не записался после 3 попыток — попробуем после Обработать');
-    }
+    if (!okLongBefore) warnItem('  ⚠ длинный текст "до" не записался после 3 попыток');
     await debugPause('После A.1-A.4');
     checkStop();
 
@@ -1102,37 +1052,24 @@
 
     const cat01Id = 'C34_W56_V57_btcategoryfirst_cat01';
     const cat01Label = getLabelByKey(cat01Id + '__items', CFG.guid.category_otherSystems);
-    if (cat01Label) {
-      if (!await setDropdownByLabel(cat01Id, cat01Label)) warnItem(`  ⚠ cat01 не выбрался ("${cat01Label}")`);
-    } else {
-      warnItem(`  ⚠ cat01: label для GUID ${CFG.guid.category_otherSystems} не найден в __items`);
-    }
+    if (cat01Label) { if (!await setDropdownByLabel(cat01Id, cat01Label)) warnItem(`  ⚠ cat01 не выбрался ("${cat01Label}")`); }
+    else warnItem(`  ⚠ cat01: label не найден в __items`);
 
     const cat02Id = 'C34_W56_V57_btcategoryfirst_cat02';
     const cat02Guid = findGuidByNum(cat02Id + '__items', grpNum);
     if (cat02Guid) {
       const cat02Label = getLabelByKey(cat02Id + '__items', cat02Guid);
-      if (cat02Label) {
-        if (!await setDropdownByLabel(cat02Id, cat02Label)) warnItem(`  ⚠ cat02 не выбрался ("${cat02Label}")`);
-      } else {
-        warnItem(`  ⚠ cat02: label для GUID ${cat02Guid} не найден`);
-      }
-    } else {
-      warnItem(`  ⚠ cat02 для группы "${grpNum}" не найден в __items`);
-    }
+      if (cat02Label) { if (!await setDropdownByLabel(cat02Id, cat02Label)) warnItem(`  ⚠ cat02 не выбрался ("${cat02Label}")`); }
+      else warnItem(`  ⚠ cat02: label для GUID ${cat02Guid} не найден`);
+    } else warnItem(`  ⚠ cat02 для группы "${grpNum}" не найден в __items`);
 
     const cat03Id = 'C34_W56_V57_btcategoryfirst_cat03';
     const cat03Guid = findGuidByNum(cat03Id + '__items', d.num);
     if (cat03Guid) {
       const cat03Label = getLabelByKey(cat03Id + '__items', cat03Guid);
-      if (cat03Label) {
-        if (!await setDropdownByLabel(cat03Id, cat03Label)) warnItem(`  ⚠ cat03 не выбрался ("${cat03Label}")`);
-      } else {
-        warnItem(`  ⚠ cat03: label для GUID ${cat03Guid} не найден`);
-      }
-    } else {
-      warnItem(`  ⚠ cat03 для "${d.num}" не найден в __items`);
-    }
+      if (cat03Label) { if (!await setDropdownByLabel(cat03Id, cat03Label)) warnItem(`  ⚠ cat03 не выбрался ("${cat03Label}")`); }
+      else warnItem(`  ⚠ cat03: label для GUID ${cat03Guid} не найден`);
+    } else warnItem(`  ⚠ cat03 для "${d.num}" не найден в __items`);
     await debugPause('После Категорий');
     checkStop();
 
@@ -1141,25 +1078,16 @@
     const isModular = CFG.modularSystems.some(x => x.toLowerCase() === sysNorm);
     const groupLabel = isModular ? CFG.groups.modular : CFG.groups.telecom;
     log(`  Система (J) = "${d.system || '—'}" → Группа = "${groupLabel}"`);
-    const okGroup = await setDropdownByLabel(
-      'C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_03',
-      groupLabel
-    );
-    if (!okGroup) {
-      err('  ✖ Группа не выбралась. Сохранение прервётся (SAP не даст создать инцидент без группы).');
-      throw new Error('Группа поддержки не выбралась');
-    }
+    const okGroup = await setDropdownByLabel('C32_W39_V41_V52_btpartnerset_/aicrm/header_fct_03', groupLabel);
+    if (!okGroup) { err('  ✖ Группа не выбралась. Сохранение прервётся.'); throw new Error('Группа поддержки не выбралась'); }
     await debugPause('После Группы поддержки');
     checkStop();
 
     log('B.3: Статус «В обработке» (E0002) — dropdown...');
     const stId = 'C32_W39_V41_V52_btadminh_lcstatus';
     const stLabel = getLabelByKey(stId + '__items', CFG.status.inProgress);
-    if (stLabel) {
-      if (!await setDropdownByLabel(stId, stLabel)) warnItem(`  ⚠ статус E0002 не выбрался ("${stLabel}")`);
-    } else {
-      warnItem(`  ⚠ статус E0002 не найден в __items`);
-    }
+    if (stLabel) { if (!await setDropdownByLabel(stId, stLabel)) warnItem(`  ⚠ статус E0002 не выбрался ("${stLabel}")`); }
+    else warnItem(`  ⚠ статус E0002 не найден в __items`);
     await debugPause('После Статуса E0002');
     checkStop();
 
@@ -1171,7 +1099,7 @@
     const editAppeared = await waitForCondition(
       () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
       40000, 200, 'перезагрузка после SAVE (C.1)');
-    if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1): форма не вернулась');
+    if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
     checkStop();
@@ -1186,8 +1114,8 @@
       40000, 200, 'E0005 в __items после EDIT (C.2)');
     if (!e0005Ready) {
       const items = parseDropdownItems(stId + '__items').byId;
-      dbg(`    [diag] __items статуса после EDIT: ${JSON.stringify(items).slice(0, 400)}`);
-      throw new Error('После EDIT в __items не появился E0005 — форма не перешла в режим редактирования');
+      dbg(`    [diag] __items после EDIT: ${JSON.stringify(items).slice(0, 400)}`);
+      throw new Error('После EDIT в __items не появился E0005');
     }
     ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
@@ -1205,12 +1133,10 @@
               () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
               20000, 200, 'перезагрузка после SAVE (C.3)');
             if (back) ok('  ✔ "До" сохранено (fallback).');
-            else warn('  ⚠ C.3: после SAVE не появилась кнопка «Обработать»');
+            else warn('  ⚠ C.3: после SAVE нет кнопки «Обработать»');
           }
         }
-      } else {
-        warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
-      }
+      } else warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
     }
 
     // ============ E.1: Добавить текст → Решение ============
@@ -1225,12 +1151,10 @@
 
     realClick(solItem);
 
-    // v1.43: ждём появления textarea (перерисовка после выбора «Решение»)
     const fieldReady = await waitForCondition(() => {
       const s = findSolutionTextarea();
       return s.r && isVisible(s.r.el);
     }, 25000, 200, 'появление textarea после «Решение»');
-
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
       throw new Error('E.1: после «Решение» не появилось textarea');
@@ -1239,53 +1163,61 @@
     await debugPause('После «Решение»');
     checkStop();
 
-    // ============ E.2a: Статус E0005 (СНАЧАЛА статус) ============
-    log('E.2a: Статус E0005...');
+    // ============ E.2: Текст решения (без событий!) ============
+    log('E.2: Текст решения...');
+    const sol = findSolutionTextarea();
+    if (!sol.r) {
+      dumpDiagnostics('E.2-no-solution-field');
+      throw new Error('E.2: не найдено поле для текста решения');
+    }
+    log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
+
+    // v1.44: НИКАКИХ input/change — только el.value = value.
+    // SAP увидит изменение только при SAVE. Иначе autoSubmit улетает на Home.
+    if (!setElementValue(sol.r.el, d.longTextSolution, false, false)) {
+      dumpDiagnostics('E.2-write-failed');
+      throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
+    }
+    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
+
+    // v1.44: проверка видимости формы перед кликом по статусу.
+    if (!isIncidentFormVisible()) {
+      dumpDiagnostics('E.2-form-lost-after-text');
+      throw new Error('E.2: форма инцидента не видна после записи текста — SAP «улетел» на Home. Текст записан, статус E0005 не установлен.');
+    }
+
+    // ============ E.2b: Статус E0005 ============
+    log('E.2b: Статус E0005...');
+    {
+      const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
+      if (r) {
+        dbg(`    [E.2b] status-dropdown: visible=${isVisible(r.el)} value="${r.el.value}" doc-title="${r.doc.title}"`);
+      } else {
+        warn('  ⚠ E.2b: дропдаун статуса не найден');
+      }
+    }
+
     const e0005InEdit = await waitForCondition(
       () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
-      10000, 200, 'E0005 в __items (E.2a)');
+      10000, 200, 'E0005 в __items (E.2b)');
     if (!e0005InEdit) {
       const items = parseDropdownItems(stId + '__items').byId;
       const keys = Object.keys(items);
-      dumpDiagnostics('E.2a-no-E0005');
-      throw new Error(`E.2a: статус E0005 не найден в __items (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
+      dumpDiagnostics('E.2b-no-E0005');
+      throw new Error(`E.2b: статус E0005 не найден в __items (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
     }
     const stLabel2 = getLabelByKey(stId + '__items', CFG.status.solution);
     if (!await setDropdownByLabel(stId, stLabel2)) {
-      throw new Error(`E.2a: не удалось установить статус "${stLabel2}"`);
+      // v1.44: если dropdown не открылся — возможно, форма улетела за время попытки
+      if (!isIncidentFormVisible()) {
+        dumpDiagnostics('E.2b-form-lost-during-dropdown');
+        throw new Error('E.2b: форма исчезла во время клика по статусу E0005 — попробуйте включить «пошагово» (это работает).');
+      }
+      throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
     }
     ok('  ✔ Статус E0005 установлен.');
     await debugPause('После E0005');
     checkStop();
-
-    // v1.43: после dropdownListBox:select SAP перерисовывает форму.
-    // Ждём «сетевой тишины» и возврата textarea, иначе писать будет некуда.
-    await waitForNetIdle(2000, 10000);
-    const taBack = await waitForCondition(
-      () => { const s = findSolutionTextarea(); return s.r && isVisible(s.r.el); },
-      15000, 200, 'textarea после E0005');
-    if (!taBack) {
-      dumpDiagnostics('E.2a-textarea-lost');
-      throw new Error('E.2a: после E0005 textarea не вернулось — форма не перерисовалась');
-    }
-
-    // ============ E.2b: Текст решения (ПОСЛЕ статуса) ============
-    log('E.2b: Текст решения...');
-    const sol = findSolutionTextarea();
-    if (!sol.r) {
-      dumpDiagnostics('E.2b-no-solution-field');
-      throw new Error('E.2b: не найдено поле для текста решения');
-    }
-    log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
-
-    if (!setElementValue(sol.r.el, d.longTextSolution, false)) {
-      dumpDiagnostics('E.2b-write-failed');
-      throw new Error(`E.2b: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
-    }
-    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв. в "${sol.id || '(no-id)'}")`);
-
-    // v1.43: короткая пауза, чтобы SAP «увидел» input, но до SAVE дошли быстро.
-    await sleep(300);
 
     // ============ E.3: SAVE ============
     log('E.3: Сохранить (решение)...');
@@ -1308,12 +1240,8 @@
         const homeOk = await waitForCondition(() => !!findVisibleCreateButton(), 30000, 200, 'переход на главную (F.1)');
         if (homeOk) {
           ok('  ✔ На главной.');
-          // v1.42: перед следующей итерацией — дождаться, пока SAP Home «отвиснет».
-          // Иначе фоновые AJAX от Home могут «съесть» клик по Create / перерисовать форму.
           await waitForNetIdle(2000, 10000);
-        } else {
-          throw new Error('F.1: «Создать сообщение» не появилась — не на главной');
-        }
+        } else throw new Error('F.1: «Создать сообщение» не появилась');
       }
     } else throw new Error('F.1: кнопка «Первая страница» не найдена');
   }
@@ -1356,23 +1284,43 @@
 
     if (!state.fileBuffer) { err('Файл не выбран.'); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return; }
 
+    // v1.45: даём браузеру перерисовать disabled-состояние кнопок
+    // (иначе при последующей работе кажется, что Старт не сработал).
+    await sleep(50);
+
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
+
+    // v1.45: при изменении startRow — только фильтр из кэша, БЕЗ re-parse.
+    // Парсинг уже был при выборе файла; повторный занимал ещё ~6 с.
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
-      log(`Перечитывание файла с Excel#${effectiveStart}…`);
-      let info;
-      try { info = parseXlsxBuffer(state.fileBuffer); }
-      catch (ex) { err('Ошибка перечитывания: ' + ex.message); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return; }
-      state.rows = filterRowsFrom(info.allRows, effectiveStart);
+      if (!state.allRows) {
+        // fallback — если кэша почему-то нет
+        log(`Читаю файл (кэш пуст)…`);
+        ui.start.textContent = '▶ Чтение файла…';
+        await sleep(50);
+        let info;
+        try { info = parseXlsxBuffer(state.fileBuffer); }
+        catch (ex) {
+          ui.start.textContent = '▶ Старт';
+          err('Ошибка перечитывания: ' + ex.message);
+          state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
+          return;
+        }
+        state.allRows = info.allRows;
+        state.totalFilled = info.totalFilled;
+        state.lastFilledExcelRow = info.lastFilled;
+        ui.start.textContent = '▶ Старт';
+      }
+      // быстрая фильтрация по startRow (~10 мс)
+      state.rows = filterRowsFrom(state.allRows, effectiveStart);
       state.parsedFrom = effectiveStart;
-      state.totalFilled = info.totalFilled;
-      state.lastFilledExcelRow = info.lastFilled;
       state.idx = 0;
       ui.prog.max = state.rows.length;
       ui.prog.value = 0;
-      log(`Загружено ${state.rows.length} строк (Excel#${effectiveStart}..#${info.lastFilled}).`);
+      log(`Загружено ${state.rows.length} строк (Excel#${effectiveStart}..#${state.lastFilledExcelRow}).`);
     }
     if (state.rows.length === 0) {
-      err(`Нет строк для обработки (старт Excel#${effectiveStart}, последняя заполненная #${state.lastFilledExcelRow}).`);
+      err(`Нет строк для обработки (старт Excel#${effectiveStart}, последняя #${state.lastFilledExcelRow}).`);
       state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return;
     }
 
@@ -1384,6 +1332,10 @@
 
     while (state.idx < state.rows.length && !state.stopped) {
       if (state.paused) { await sleep(300); continue; }
+      // v1.44: перед итерацией — добить остаточные AJAX от предыдущего Home
+      await waitForNetIdle(2000, 5000);
+      checkStop();
+
       const item = state.rows[state.idx];
       ui.startRow.value = item.excelRowNum;
       updateStat();
@@ -1406,7 +1358,6 @@
         state.stopped = true; break;
       }
       if (ui.step.checked) await waitForManual(`Строка ${state.idx} готова. Проверьте SAP и нажмите «Продолжить».`);
-      // v1.42: 1500 → 3000 мс — даём SAP «выдохнуть» перед новой итерацией.
       await sleep(3000);
     }
 
