@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.42
+// @version      1.43
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -1223,72 +1223,71 @@
     checkStop();
     if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
 
-    const ltBefore = (findEl('C38_W62_V63_V65_text_longtext') || {}).value || '';
     realClick(solItem);
 
+    // v1.43: ждём появления textarea (перерисовка после выбора «Решение»)
     const fieldReady = await waitForCondition(() => {
-      const el = findEl('C38_W62_V63_V65_text_longtext');
-      if (el && isVisible(el) && ((el.value || '') !== ltBefore)) return true;
-      let any = false;
-      walkFrames((doc) => {
-        if (any) return;
-        let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
-        for (const t of tas) { if (isVisible(t)) { any = true; return; } }
-      });
-      return any;
+      const s = findSolutionTextarea();
+      return s.r && isVisible(s.r.el);
     }, 25000, 200, 'появление textarea после «Решение»');
 
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
-      throw new Error('E.1: после «Решение» не появилось ни одной видимой textarea');
+      throw new Error('E.1: после «Решение» не появилось textarea');
     }
     ok('  ✔ «Решение» выбрано.');
-    // v1.42: даём SAP время «устояться» после перерисовки textarea,
-    // прежде чем писать текст и кликать по дропдауну статуса.
-    await waitForNetIdle(1500, 5000);
     await debugPause('После «Решение»');
     checkStop();
 
-    // ============ E.2: Текст решения + Статус E0005 ============
-    log('E.2: Текст решения...');
-    const sol = findSolutionTextarea();
-    if (!sol.r) {
-      dumpDiagnostics('E.2-no-solution-field');
-      throw new Error('E.2: не найдено поле для текста решения (text_longtext и альтернативы отсутствуют)');
-    }
-    const solIdLabel = sol.id || '(no-id)';
-    log(`  найдено поле: id="${solIdLabel}"`);
-
-    // v1.42: fireChange=false — не триггерим SAP autoSubmit, иначе view может улететь на Home.
-    if (!setElementValue(sol.r.el, d.longTextSolution, false)) {
-      dumpDiagnostics('E.2-write-failed');
-      throw new Error(`E.2: не удалось записать текст решения в поле "${solIdLabel}"`);
-    }
-    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв. в "${solIdLabel}")`);
-
-    // v1.42: после записи текста даём SAP переварить input, проверяем, что мы всё ещё на форме.
-    await sleep(500);
-    if (!isIncidentFormPresent()) {
-      dumpDiagnostics('E.2-form-lost-after-text');
-      throw new Error('E.2: форма инцидента исчезла после записи текста (SAP «улётел» на Home). Инцидент создан, текст записан, статус E0005 не установлен.');
-    }
-
-    log('E.2: Статус E0005...');
+    // ============ E.2a: Статус E0005 (СНАЧАЛА статус) ============
+    log('E.2a: Статус E0005...');
     const e0005InEdit = await waitForCondition(
       () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
-      10000, 200, 'E0005 в __items (E.2)');
+      10000, 200, 'E0005 в __items (E.2a)');
     if (!e0005InEdit) {
       const items = parseDropdownItems(stId + '__items').byId;
       const keys = Object.keys(items);
-      dumpDiagnostics('E.2-no-E0005');
-      throw new Error(`E.2: статус E0005 не найден в __items (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
+      dumpDiagnostics('E.2a-no-E0005');
+      throw new Error(`E.2a: статус E0005 не найден в __items (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
     }
     const stLabel2 = getLabelByKey(stId + '__items', CFG.status.solution);
     if (!await setDropdownByLabel(stId, stLabel2)) {
-      throw new Error(`E.2: не удалось установить статус "${stLabel2}"`);
+      throw new Error(`E.2a: не удалось установить статус "${stLabel2}"`);
     }
     ok('  ✔ Статус E0005 установлен.');
+    await debugPause('После E0005');
+    checkStop();
 
+    // v1.43: после dropdownListBox:select SAP перерисовывает форму.
+    // Ждём «сетевой тишины» и возврата textarea, иначе писать будет некуда.
+    await waitForNetIdle(2000, 10000);
+    const taBack = await waitForCondition(
+      () => { const s = findSolutionTextarea(); return s.r && isVisible(s.r.el); },
+      15000, 200, 'textarea после E0005');
+    if (!taBack) {
+      dumpDiagnostics('E.2a-textarea-lost');
+      throw new Error('E.2a: после E0005 textarea не вернулось — форма не перерисовалась');
+    }
+
+    // ============ E.2b: Текст решения (ПОСЛЕ статуса) ============
+    log('E.2b: Текст решения...');
+    const sol = findSolutionTextarea();
+    if (!sol.r) {
+      dumpDiagnostics('E.2b-no-solution-field');
+      throw new Error('E.2b: не найдено поле для текста решения');
+    }
+    log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
+
+    if (!setElementValue(sol.r.el, d.longTextSolution, false)) {
+      dumpDiagnostics('E.2b-write-failed');
+      throw new Error(`E.2b: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
+    }
+    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв. в "${sol.id || '(no-id)'}")`);
+
+    // v1.43: короткая пауза, чтобы SAP «увидел» input, но до SAVE дошли быстро.
+    await sleep(300);
+
+    // ============ E.3: SAVE ============
     log('E.3: Сохранить (решение)...');
     const saveBtn2 = findEl('C32_W39_V41_SAVE');
     if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
