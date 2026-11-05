@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.45
+// @version      1.46
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -48,28 +48,30 @@
         };
       }
 
-      const origSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.send = function(body) {
-        try {
-          if (body && typeof body === 'string' && body.indexOf('htmlbevt_oid') >= 0) {
-            const mOid = body.match(/htmlbevt_oid=([^&]+)/);
-            const mTy  = body.match(/htmlbevt_ty=([^&]+)/);
-            const mId  = body.match(/htmlbevt_id=([^&]+)/);
-            if (mOid) {
-              console.log('[SM][net] POST',
-                'ty=' + decodeURIComponent(mTy ? mTy[1] : ''),
-                'oid=' + decodeURIComponent(mOid[1]),
-                'id='  + decodeURIComponent(mId ? mId[1] : ''));
-            }
-          }
-        } catch (e) {}
-        this.addEventListener('load', function() {
-          const url = this.responseURL || '';
-          if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
-          triggerWaiters(url);
-        });
-        return origSend.apply(this, arguments);
-      };
+const origSend = XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send = function(body) {
+  const isSapPost = body && typeof body === 'string' && body.indexOf('htmlbevt_oid') >= 0;
+  try {
+    if (isSapPost) {
+      const mOid = body.match(/htmlbevt_oid=([^&]+)/);
+      const mTy  = body.match(/htmlbevt_ty=([^&]+)/);
+      const mId  = body.match(/htmlbevt_id=([^&]+)/);
+      if (mOid) {
+        console.log('[SM][net] POST',
+          'ty=' + decodeURIComponent(mTy ? mTy[1] : ''),
+          'oid=' + decodeURIComponent(mOid[1]),
+          'id='  + decodeURIComponent(mId ? mId[1] : ''));
+      }
+    }
+  } catch (e) {}
+  if (isSapPost) window.__SM_LAST_POST_TS__ = Date.now();  // ← v1.46: на старте POST
+  this.addEventListener('load', function() {
+    const url = this.responseURL || '';
+    if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
+    triggerWaiters(url);
+  });
+  return origSend.apply(this, arguments);
+};
 
       window.__SM_WAIT_FOR_NET__ = function(urlPart, timeoutMs) {
         return new Promise(resolve => {
@@ -370,7 +372,51 @@
   }
 
   function findEl(id) { const r = findInFrames(id); return r ? r.el : null; }
+// v1.46: поиск id только в конкретном документе (не по всем фреймам).
+function findInDoc(doc, id) {
+  if (!doc) return null;
+  try { const el = doc.getElementById(id); if (el) return el; } catch (e) {}
+  const stripped = String(id).replace(/^C\d+(?:_[WV]\d+)+_/, '');
+  if (stripped === id) return null;
+  const re = new RegExp('^C\\d+(?:_[WV]\\d+)+_' + escapeRegex(stripped) + '$');
+  let all; try { all = doc.querySelectorAll('[id]'); } catch (e) { return null; }
+  for (const el of all) if (re.test(el.id)) return el;
+  return null;
+}
 
+// v1.46: документ текущей формы — определяем по видимому полю «Описание».
+function getFormDoc() {
+  const r = findInFrames('C32_W39_V41_V52_btadminh_struct.description');
+  return (r && r.el && isVisible(r.el)) ? r.doc : null;
+}
+
+// v1.46: parse __items внутри конкретного документа.
+function parseDropdownItemsInDoc(doc, itemsId) {
+  const byId = {};
+  if (!doc) return { byId };
+  const el = findInDoc(doc, itemsId);
+  if (!el) return { byId };
+  const html = el.innerHTML || '';
+  const re = /a\["([^"]+)"\]\s*=\s*"([^"]*)"/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const key = m[1];
+    const text = (m[2] || '')
+      .replace(/&nbsp;/g, ' ').replace(/&minus;/g, '-').replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/\s+/g, ' ').trim();
+    if (!key || !text || text === ' ') continue;
+    byId[key] = text;
+  }
+  return { byId };
+}
+
+// v1.46: label из __items ТОЛЬКО текущей формы (игнор stale-фреймов).
+function getLabelInFormFrame(itemsId, key) {
+  const doc = getFormDoc();
+  if (!doc) return null;
+  return parseDropdownItemsInDoc(doc, itemsId).byId[key] || null;
+}
   function isVisible(el) {
     if (!el) return false;
     try {
@@ -388,22 +434,30 @@
   }
   function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
-  async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
-    const t0 = Date.now();
-    let lastLog = 0;
-    while (Date.now() - t0 < timeoutMs) {
-      checkStop();
-      const idle = (typeof window.__SM_NET_IDLE_MS__ === 'function') ? window.__SM_NET_IDLE_MS__() : 999999;
-      if (idle >= idleMs) return true;
-      if (Date.now() - t0 - lastLog > 3000) {
-        lastLog = Date.now() - t0;
-        dbg(`    … ждём сетевой тишины (idle=${idle} мс < ${idleMs})`);
-      }
-      await sleep(200);
+async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
+  const t0 = Date.now();
+  let lastLog = 0;
+  while (Date.now() - t0 < timeoutMs) {
+    checkStop();
+    let minIdle = 999999;
+    walkFrames((doc, win) => {
+      try {
+        if (win && typeof win.__SM_NET_IDLE_MS__ === 'function') {
+          const idle = win.__SM_NET_IDLE_MS__();
+          if (typeof idle === 'number' && idle < minIdle) minIdle = idle;
+        }
+      } catch (e) {}
+    });
+    if (minIdle >= idleMs) return true;
+    if (Date.now() - t0 - lastLog > 3000) {
+      lastLog = Date.now() - t0;
+      dbg(`    … ждём сетевой тишины (minIdle=${minIdle} мс < ${idleMs})`);
     }
-    dbg(`    ⚠ сетевой тишины не дождались за ${timeoutMs} мс`);
-    return false;
+    await sleep(200);
   }
+  dbg(`    ⚠ сетевой тишины не дождались за ${timeoutMs} мс`);
+  return false;
+}
 
   function realClick(el) {
     if (!el) return;
@@ -1104,20 +1158,28 @@
     await debugPause('После создания инцидента');
     checkStop();
 
-    log('C.2: «Обработать»...');
-    const editBtn = findEl('C32_W39_V41_EDIT');
-    if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
-    if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
-      throw new Error('Не могу нажать «Обработать» (C.2)');
-    const e0005Ready = await waitForCondition(
-      () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
-      40000, 200, 'E0005 в __items после EDIT (C.2)');
-    if (!e0005Ready) {
-      const items = parseDropdownItems(stId + '__items').byId;
-      dbg(`    [diag] __items после EDIT: ${JSON.stringify(items).slice(0, 400)}`);
-      throw new Error('После EDIT в __items не появился E0005');
-    }
-    ok('  ✔ Режим редактирования.');
+log('C.2: «Обработать»...');
+const formDocC2 = getFormDoc();
+let editBtn = formDocC2 ? findInDoc(formDocC2, 'C32_W39_V41_EDIT') : null;
+if (!editBtn) editBtn = findEl('C32_W39_V41_EDIT');
+if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
+if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
+  throw new Error('Не могу нажать «Обработать» (C.2)');
+
+// v1.46: дождаться, пока EDIT-POST завершится и форма перерисуется в edit-mode.
+await waitForNetIdle(500, 30000);
+
+// v1.46: E0005 ищем ТОЛЬКО в текущей форме (не в stale-фрейме).
+const e0005Ready = await waitForCondition(
+  () => getLabelInFormFrame(stId + '__items', CFG.status.solution) !== null,
+  40000, 200, 'E0005 в __items после EDIT (C.2)');
+if (!e0005Ready) {
+  const doc = getFormDoc();
+  const items = doc ? parseDropdownItemsInDoc(doc, stId + '__items').byId : {};
+  dbg(`    [diag] __items после EDIT (форма): ${JSON.stringify(items).slice(0, 400)}`);
+  throw new Error('После EDIT в __items не появился E0005');
+}
+ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
     checkStop();
 
@@ -1159,8 +1221,9 @@
       dumpDiagnostics('E.1-no-textarea');
       throw new Error('E.1: после «Решение» не появилось textarea');
     }
-    ok('  ✔ «Решение» выбрано.');
-    await debugPause('После «Решение»');
+ok('  ✔ «Решение» выбрано.');
+await waitForNetIdle(500, 15000);   // v1.46: ADDTEXT-POST должен улечься
+await debugPause('После «Решение»');
     checkStop();
 
     // ============ E.2: Текст решения (без событий!) ============
@@ -1178,7 +1241,8 @@
       dumpDiagnostics('E.2-write-failed');
       throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
     }
-    log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
+log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
+await waitForNetIdle(300, 5000);    // v1.46: страховка перед E.2b
 
     // v1.44: проверка видимости формы перед кликом по статусу.
     if (!isIncidentFormVisible()) {
@@ -1187,35 +1251,39 @@
     }
 
     // ============ E.2b: Статус E0005 ============
-    log('E.2b: Статус E0005...');
-    {
-      const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
-      if (r) {
-        dbg(`    [E.2b] status-dropdown: visible=${isVisible(r.el)} value="${r.el.value}" doc-title="${r.doc.title}"`);
-      } else {
-        warn('  ⚠ E.2b: дропдаун статуса не найден');
-      }
-    }
+log('E.2b: Статус E0005...');
+// v1.46: не кликаем, пока EDIT-форма не устоялась.
+await waitForNetIdle(500, 15000);
 
-    const e0005InEdit = await waitForCondition(
-      () => getLabelByKey(stId + '__items', CFG.status.solution) !== null,
-      10000, 200, 'E0005 в __items (E.2b)');
-    if (!e0005InEdit) {
-      const items = parseDropdownItems(stId + '__items').byId;
-      const keys = Object.keys(items);
-      dumpDiagnostics('E.2b-no-E0005');
-      throw new Error(`E.2b: статус E0005 не найден в __items (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
-    }
-    const stLabel2 = getLabelByKey(stId + '__items', CFG.status.solution);
-    if (!await setDropdownByLabel(stId, stLabel2)) {
-      // v1.44: если dropdown не открылся — возможно, форма улетела за время попытки
-      if (!isIncidentFormVisible()) {
-        dumpDiagnostics('E.2b-form-lost-during-dropdown');
-        throw new Error('E.2b: форма исчезла во время клика по статусу E0005 — попробуйте включить «пошагово» (это работает).');
-      }
-      throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
-    }
-    ok('  ✔ Статус E0005 установлен.');
+{
+  const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
+  if (r) {
+    dbg(`    [E.2b] status-dropdown: visible=${isVisible(r.el)} value="${r.el.value}" doc-title="${r.doc.title}"`);
+  } else {
+    warn('  ⚠ E.2b: дропдаун статуса не найден');
+  }
+}
+
+const e0005InEdit = await waitForCondition(
+  () => getLabelInFormFrame(stId + '__items', CFG.status.solution) !== null,
+  10000, 200, 'E0005 в __items (E.2b)');
+if (!e0005InEdit) {
+  const doc = getFormDoc();
+  const items = doc ? parseDropdownItemsInDoc(doc, stId + '__items').byId : {};
+  const keys = Object.keys(items);
+  dumpDiagnostics('E.2b-no-E0005');
+  throw new Error(`E.2b: статус E0005 не найден в __items текущей формы (доступно: ${keys.length ? keys.join(',') : 'ничего'})`);
+}
+const stLabel2 = getLabelInFormFrame(stId + '__items', CFG.status.solution);
+if (!stLabel2) throw new Error('E.2b: не удалось получить label для E0005');
+if (!await setDropdownByLabel(stId, stLabel2)) {
+  if (!isIncidentFormVisible()) {
+    dumpDiagnostics('E.2b-form-lost-during-dropdown');
+    throw new Error('E.2b: форма исчезла во время клика по статусу E0005');
+  }
+  throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
+}
+ok('  ✔ Статус E0005 установлен.');
     await debugPause('После E0005');
     checkStop();
 
