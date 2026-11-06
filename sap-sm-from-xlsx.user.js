@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.48
+// @version      1.49
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -267,7 +267,8 @@
 
   // ==================== ЛОГИ ====================
   function log(msg, cls='') {
-    const t = new Date().toLocaleTimeString();
+    const d = new Date();
+    const t = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
     const esc = String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     ui.log.insertAdjacentHTML('beforeend', `<span style="${cls}">[${t}] ${esc}\n</span>`);
     ui.log.scrollTop = ui.log.scrollHeight; console.log('[SM]', msg);
@@ -469,7 +470,7 @@
   }
   function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
-  async function waitForNetIdle(idleMs = 2000, timeoutMs = 10000) {
+  async function waitForNetIdle(idleMs = 1000, timeoutMs = 20000) {
     const t0 = Date.now();
     let lastLog = 0;
     while (Date.now() - t0 < timeoutMs) {
@@ -625,15 +626,10 @@
   }
 
   function findSolutionTextarea(preferredDoc) {
+    // v1.49: строго ищем поле решения C38_...
     if (preferredDoc) {
       let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_text_longtext');
       if (el && el.tagName === 'TEXTAREA' && isVisible(el)) return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
-      let tas = preferredDoc.querySelectorAll('textarea');
-      for (const ta of tas) {
-        if (!isVisible(ta)) continue;
-        const id = ta.id || '';
-        if (/longtext/i.test(id) || /solution/i.test(id)) return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el: ta, depth: 0 }, id: ta.id };
-      }
     }
 
     const tryIds = [
@@ -1213,12 +1209,15 @@
     if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
     
+    await waitForNetIdle(1000, 30000); // v1.49: ждем завершения POST
+
     const editAppeared = await waitForCondition(
       () => {
         const doc = getFormDoc(state.currentDesc);
         if (!doc) return false;
-        const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-        return btn && isVisible(btn);
+        const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
+        const saveBtnNew = findInDoc(doc, 'C32_W39_V41_SAVE');
+        return editBtn && isVisible(editBtn) && (!saveBtnNew || !isVisible(saveBtnNew));
       }, 40000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
@@ -1234,6 +1233,7 @@
         const saveBtn3 = formDocC3 ? findInDoc(formDocC3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
         if (saveBtn3) {
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
+            await waitForNetIdle(1000, 20000);
             const back = await waitForCondition(
               () => {
                 const doc = getFormDoc(state.currentDesc);
@@ -1263,17 +1263,19 @@
     if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
 
     realClick(solItem);
+    await waitForNetIdle(1000, 15000); // v1.49: ждем открытия поля
 
     const fieldReady = await waitForCondition(() => {
-      const s = findSolutionTextarea(formDocE1);
-      return s.r && isVisible(s.r.el);
-    }, 25000, 200, 'появление textarea после «Решение»');
+      const doc = getFormDoc(state.currentDesc);
+      if (!doc) return false;
+      const el = findInDoc(doc, 'C38_W62_V63_V65_text_longtext');
+      return el && el.tagName === 'TEXTAREA' && isVisible(el);
+    }, 25000, 200, 'появление textarea решения');
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
       throw new Error('E.1: после «Решение» не появилось textarea');
     }
     ok('  ✔ «Решение» выбрано.');
-    await waitForNetIdle(500, 15000); // v1.46
     await debugPause('После «Решение»');
     checkStop();
 
@@ -1292,7 +1294,7 @@
       throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
     }
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
-    await waitForNetIdle(300, 5000); // v1.46
+    await waitForNetIdle(500, 5000); // v1.49: страховка перед кликом
 
     if (!isIncidentFormVisible()) {
       dumpDiagnostics('E.2-form-lost-after-text');
@@ -1317,49 +1319,34 @@
     }, 30000, 200, 'EDIT button interactive and clicked');
 
     if (!editClicked) throw new Error('C.2: не удалось кликнуть «Обработать» (кнопка не готова)');
+    await waitForNetIdle(1000, 30000); // v1.49: ждем завершения POST
 
-    const e0005Ready = await waitForCondition(() => {
+    const saveReady = await waitForCondition(() => {
         const doc = getFormDoc(state.currentDesc);
         if (!doc) return false;
-        return parseDropdownItemsInDoc(doc, stId + '__items').byId[CFG.status.solution] !== undefined;
-    }, 30000, 200, 'E0005 in __items (edit mode)');
-
-    if (!e0005Ready) {
-        const doc = getFormDoc(state.currentDesc);
-        const items = doc ? parseDropdownItemsInDoc(doc, stId + '__items').byId : {};
-        dbg(`    [diag] __items после EDIT (форма): ${JSON.stringify(items).slice(0, 400)}`);
-        throw new Error('После EDIT в __items не появился E0005');
-    }
+        const saveBtnNew = findInDoc(doc, 'C32_W39_V41_SAVE');
+        const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
+        return saveBtnNew && isVisible(saveBtnNew) && (!editBtn || !isVisible(editBtn));
+    }, 30000, 200, 'edit mode (C.2)');
+    if (!saveReady) throw new Error('C.2: форма не перешла в edit-mode');
     ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
     checkStop();
 
     // ============ E.2b: Статус E0005 ============
     log('E.2b: Статус E0005...');
-    await waitForNetIdle(500, 15000);
-
-    {
-      const formDocE2b = getFormDoc(state.currentDesc);
-      if (formDocE2b) {
-        const statusInput = findInDoc(formDocE2b, 'C32_W39_V41_V52_btadminh_lcstatus');
-        dbg(`    [E.2b] status-dropdown: visible=${isVisible(statusInput)} value="${statusInput ? statusInput.value : ''}"`);
-      } else {
-        warn('  ⚠ E.2b: форма не найдена');
-      }
-    }
-
-    const formDocE2b2 = getFormDoc(state.currentDesc);
-    if (!formDocE2b2) throw new Error('E.2b: текущая форма не найдена');
+    const formDocE2b = getFormDoc(state.currentDesc);
+    if (!formDocE2b) throw new Error('E.2b: текущая форма не найдена');
     
-    const stLabel2 = parseDropdownItemsInDoc(formDocE2b2, stId + '__items').byId[CFG.status.solution];
+    const stLabel2 = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId[CFG.status.solution];
     if (!stLabel2) {
-      const items = parseDropdownItemsInDoc(formDocE2b2, stId + '__items').byId;
+      const items = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId;
       const keys = Object.keys(items);
       dumpDiagnostics('E.2b-no-E0005');
       throw new Error(`E.2b: E0005 нет в __items текущей формы (есть: ${keys.length ? keys.join(',') : 'ничего'})`);
     }
 
-    if (!await setDropdownByLabel(stId, stLabel2, formDocE2b2)) {
+    if (!await setDropdownByLabel(stId, stLabel2, formDocE2b)) {
       if (!isIncidentFormVisible()) {
         dumpDiagnostics('E.2b-form-lost-during-dropdown');
         throw new Error('E.2b: форма исчезла во время клика по статусу E0005');
@@ -1367,6 +1354,7 @@
       throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
     }
     ok('  ✔ Статус E0005 установлен.');
+    await waitForNetIdle(1000, 15000); // v1.49
     await debugPause('После E0005');
     checkStop();
 
@@ -1378,6 +1366,8 @@
     if (!nativeSubmitButton(saveBtn2, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (E.3)');
     
+    await waitForNetIdle(1000, 30000); // v1.49
+
     const backView = await waitForCondition(
       () => {
         const doc = getFormDoc(state.currentDesc);
