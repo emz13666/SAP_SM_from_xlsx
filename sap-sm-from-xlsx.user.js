@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.53
+// @version      1.54
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -387,38 +387,48 @@
   }
 
   function getFormDoc(expectedDesc) {
-    if (expectedDesc === undefined) expectedDesc = state.currentDesc;
     let bestDoc = null;
-    let bestScore = -1;
+    let maxScore = -1;
 
     walkFrames((doc, win, depth) => {
       if (win && win.frameElement) {
         try {
           const rect = win.frameElement.getBoundingClientRect();
-          if (rect.width === 0 || rect.height === 0) return;
+          if (rect.width === 0 || rect.height === 0) return; // игнорируем скрытые iframe
         } catch (e) { return; }
       }
 
-      const descEl = findInDoc(doc, 'C32_W39_V41_V52_btadminh_struct.description');
-      if (!descEl || !isVisible(descEl)) return;
-
-      if (expectedDesc) {
-        const v = String(descEl.value || '').trim();
-        const exp = String(expectedDesc).trim();
-        if (!v || !exp) return;
-        const n = Math.min(15, exp.length);
-        if (v.substring(0, n) !== exp.substring(0, n)) return;
-      }
-
-      let score = 1;
+      let score = 0;
       const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
       const saveBtn = findInDoc(doc, 'C32_W39_V41_SAVE');
-      if (editBtn && isVisible(editBtn)) score++;
-      if (saveBtn && isVisible(saveBtn)) score++;
-      if (findInDoc(doc, 'C32_W39_V41_V52_btadminh_lcstatus')) score++;
+      
+      if (editBtn && isVisible(editBtn)) score += 10;
+      if (saveBtn && isVisible(saveBtn)) score += 10;
+      
+      const descEl = findInDoc(doc, 'C32_W39_V41_V52_btadminh_struct.description');
+      if (descEl && isVisible(descEl)) {
+        let text = descEl.value;
+        if (text === undefined || text === null) text = descEl.textContent || descEl.innerText || '';
+        text = String(text).trim();
+        
+        if (expectedDesc) {
+          const exp = String(expectedDesc).trim();
+          if (exp && text && (text.includes(exp.substring(0, 15)) || exp.includes(text.substring(0, 15)))) {
+            score += 5;
+          }
+        } else {
+          score += 5;
+        }
+      }
+      
+      try {
+        if (doc.title && expectedDesc && doc.title.includes(expectedDesc.substring(0, 15))) {
+          score += 3;
+        }
+      } catch(e) {}
 
-      if (score > bestScore) {
-        bestScore = score;
+      if (score > maxScore && score > 0) {
+        maxScore = score;
         bestDoc = doc;
       }
     });
@@ -624,7 +634,7 @@
     return norm(el.value) === norm(value);
   }
 
-  // v1.53: СТРОГИЙ поиск поля решения. Никаких C27_...!
+  // Строгий поиск поля решения. Никаких C27 (журнала)!
   function findSolutionTextarea(preferredDoc) {
     if (preferredDoc) {
       let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_text_longtext');
@@ -632,11 +642,26 @@
         return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
       }
     }
-    // Если в preferredDoc не нашли, ищем во всех фреймах строго по ID
+    
     let r = findInFrames('C38_W62_V63_V65_text_longtext');
     if (r && r.el && r.el.tagName === 'TEXTAREA' && isVisible(r.el)) {
       return { r, id: r.el.id };
     }
+    
+    // Запасной поиск среди всех textarea, исключая C27
+    let found = null;
+    walkFrames((doc, win, depth) => {
+      if (found) return;
+      let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        const id = ta.id || '';
+        if (id.includes('text_longtext') && !id.includes('C27_W84_V85_V87')) {
+          found = { doc, win, el: ta, depth }; return;
+        }
+      }
+    });
+    if (found) return { r: found, id: found.el.id };
     return { r: null, id: null };
   }
 
@@ -1095,7 +1120,7 @@
 
     await waitForNetIdle(2000, 5000);
 
-    nativeSubmitButton(createBtn, 'thtmlb:button:click:0', 'C28_W96_V97_CREATE', 'INCIDENT_CREATE', 0);
+    nativeSubmitButton(createBtn, 'htmlb:button:click:0', 'C28_W96_V97_CREATE', 'INCIDENT_CREATE', 0);
 
     let descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 40000, 'поле «Описание»');
     if (!descField) descField = await waitForVisible('C32_W39_V41_V52_btadminh_struct.description', 10000, 'поле «Описание»');
@@ -1187,10 +1212,13 @@
     const editAppeared = await waitForCondition(
       () => {
         const doc = getFormDoc(state.currentDesc);
-        if (!doc) return false;
-        const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
-        return editBtn && isVisible(editBtn);
-      }, 40000, 200, 'перезагрузка после SAVE (C.1)');
+        if (doc) {
+            const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+            if (btn && isVisible(btn)) return true;
+        }
+        const r = findInFrames('C32_W39_V41_EDIT');
+        return !!(r && r.el && isVisible(r.el));
+      }, 60000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
@@ -1296,13 +1324,18 @@
     await waitForNetIdle(2000, 30000);
 
     const saveReady = await waitForCondition(() => {
-        const doc = getFormDoc(state.currentDesc);
-        if (doc) {
-            const saveBtnNew = findInDoc(doc, 'C32_W39_V41_SAVE');
-            if (saveBtnNew && !saveBtnNew.disabled) return true;
-        }
-        const r = findInFrames('C32_W39_V41_SAVE');
-        return !!(r && r.el && !r.el.disabled && isVisible(r.el));
+        let ready = false;
+        walkFrames(d => {
+            if (ready) return;
+            const links = d.querySelectorAll('a, button');
+            for (const a of links) {
+                const txt = (a.textContent || '').trim();
+                if (isVisible(a) && (txt === 'Сохранить' || (a.id && a.id.endsWith('_SAVE'))) && !a.disabled) {
+                    ready = true; return;
+                }
+            }
+        });
+        return ready;
     }, 30000, 200, 'save button active (edit mode)');
     if (!saveReady) throw new Error('C.2: форма не перешла в edit-mode (Сохранить неактивна)');
     ok('  ✔ Режим редактирования.');
@@ -1318,7 +1351,6 @@
         stLabel2 = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId[CFG.status.solution];
     }
     if (!stLabel2) {
-        // fallback во все фреймы
         stLabel2 = parseDropdownItems(stId + '__items').byId[CFG.status.solution];
     }
 
@@ -1415,6 +1447,9 @@
     await sleep(50);
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
+    
+    // Сохраняем стартовую строку в LocalStorage при нажатии Старт
+    saveState(state.fileName, effectiveStart);
 
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
       if (!state.allRows) {
