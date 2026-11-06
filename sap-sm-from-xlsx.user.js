@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.49
+// @version      1.50
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -625,22 +625,21 @@
     return norm(el.value) === norm(value);
   }
 
+  // v1.50: строгий поиск поля решения, без захвата журнала C27_...
   function findSolutionTextarea(preferredDoc) {
-    // v1.49: строго ищем поле решения C38_...
     if (preferredDoc) {
-      let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_text_longtext');
-      if (el && el.tagName === 'TEXTAREA' && isVisible(el)) return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
-    }
-
-    const tryIds = [
-      'C38_W62_V63_V65_text_longtext',
-      'C38_W62_V63_V65_text_solution_longtext',
-      'C38_W62_V63_V65_text_longtext_solution',
-      'C38_W62_V63_V65_solution_longtext'
-    ];
-    for (const id of tryIds) {
-      const r = findInFrames(id);
-      if (r && r.el && r.el.tagName === 'TEXTAREA') return { r, id };
+      let el = preferredDoc.getElementById('C38_W62_V63_V65_text_longtext');
+      if (el && el.tagName === 'TEXTAREA' && isVisible(el)) {
+        return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
+      }
+      let tas = preferredDoc.querySelectorAll('textarea');
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        const id = ta.id || '';
+        if (id.includes('text_longtext') && !id.includes('C27_W84_V85_V87')) {
+          return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el: ta, depth: 0 }, id: ta.id };
+        }
+      }
     }
     let found = null;
     walkFrames((doc, win, depth) => {
@@ -649,18 +648,9 @@
       for (const ta of tas) {
         if (!isVisible(ta)) continue;
         const id = ta.id || '';
-        if (/longtext/i.test(id) || /solution/i.test(id) || /text_?area/i.test(id)) {
+        if (id.includes('text_longtext') && !id.includes('C27_W84_V85_V87')) {
           found = { doc, win, el: ta, depth }; return;
         }
-      }
-    });
-    if (found) return { r: found, id: found.el.id };
-    walkFrames((doc, win, depth) => {
-      if (found) return;
-      let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
-      for (const ta of tas) {
-        if (!isVisible(ta)) continue;
-        found = { doc, win, el: ta, depth }; return;
       }
     });
     if (found) return { r: found, id: found.el.id };
@@ -1209,15 +1199,14 @@
     if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
     
-    await waitForNetIdle(1000, 30000); // v1.49: ждем завершения POST
+    await waitForNetIdle(1000, 30000); // v1.49
 
     const editAppeared = await waitForCondition(
       () => {
         const doc = getFormDoc(state.currentDesc);
         if (!doc) return false;
         const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
-        const saveBtnNew = findInDoc(doc, 'C32_W39_V41_SAVE');
-        return editBtn && isVisible(editBtn) && (!saveBtnNew || !isVisible(saveBtnNew));
+        return editBtn && isVisible(editBtn);
       }, 40000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
@@ -1265,11 +1254,13 @@
     realClick(solItem);
     await waitForNetIdle(1000, 15000); // v1.49: ждем открытия поля
 
+    // v1.50: строго ждем появления именно C38_..._text_longtext
     const fieldReady = await waitForCondition(() => {
       const doc = getFormDoc(state.currentDesc);
       if (!doc) return false;
-      const el = findInDoc(doc, 'C38_W62_V63_V65_text_longtext');
-      return el && el.tagName === 'TEXTAREA' && isVisible(el);
+      const el = doc.getElementById('C38_W62_V63_V65_text_longtext');
+      if (!el) return false;
+      return el.tagName === 'TEXTAREA' && isVisible(el);
     }, 25000, 200, 'появление textarea решения');
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
@@ -1294,7 +1285,7 @@
       throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
     }
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
-    await waitForNetIdle(500, 5000); // v1.49: страховка перед кликом
+    await waitForNetIdle(500, 5000); // v1.49
 
     if (!isIncidentFormVisible()) {
       dumpDiagnostics('E.2-form-lost-after-text');
@@ -1321,14 +1312,14 @@
     if (!editClicked) throw new Error('C.2: не удалось кликнуть «Обработать» (кнопка не готова)');
     await waitForNetIdle(1000, 30000); // v1.49: ждем завершения POST
 
+    // v1.50: ждем, пока кнопка Сохранить станет АКТИВНОЙ (не disabled)
     const saveReady = await waitForCondition(() => {
         const doc = getFormDoc(state.currentDesc);
         if (!doc) return false;
         const saveBtnNew = findInDoc(doc, 'C32_W39_V41_SAVE');
-        const editBtn = findInDoc(doc, 'C32_W39_V41_EDIT');
-        return saveBtnNew && isVisible(saveBtnNew) && (!editBtn || !isVisible(editBtn));
-    }, 30000, 200, 'edit mode (C.2)');
-    if (!saveReady) throw new Error('C.2: форма не перешла в edit-mode');
+        return saveBtnNew && !saveBtnNew.disabled;
+    }, 30000, 200, 'save button active (edit mode)');
+    if (!saveReady) throw new Error('C.2: форма не перешла в edit-mode (Сохранить неактивна)');
     ok('  ✔ Режим редактирования.');
     await debugPause('После «Обработать»');
     checkStop();
