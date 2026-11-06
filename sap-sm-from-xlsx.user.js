@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.54
+// @version      1.55
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -386,6 +386,7 @@
     return null;
   }
 
+  // v1.55: Улучшенный поиск формы (учитывает View Mode, где текст лежит в textContent)
   function getFormDoc(expectedDesc) {
     let bestDoc = null;
     let maxScore = -1;
@@ -1218,7 +1219,7 @@
         }
         const r = findInFrames('C32_W39_V41_EDIT');
         return !!(r && r.el && isVisible(r.el));
-      }, 60000, 200, 'перезагрузка после SAVE (C.1)');
+      }, 30000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
     await debugPause('После создания инцидента');
