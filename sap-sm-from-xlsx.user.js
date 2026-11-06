@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.56
+// @version      1.57
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -386,7 +386,7 @@
     return null;
   }
 
-  // v1.55: Улучшенный поиск формы (учитывает View Mode, где текст лежит в textContent)
+  // Улучшенный поиск формы (учитывает View Mode, где текст лежит в textContent)
   function getFormDoc(expectedDesc) {
     let bestDoc = null;
     let maxScore = -1;
@@ -635,7 +635,7 @@
     return norm(el.value) === norm(value);
   }
 
-  // Строгий поиск поля решения. Игнорируем журнал (C27_...).
+  // v1.57: Убран жесткий запрет на C27. Теперь ищется любой видимый textarea с суффиксом text_longtext.
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
@@ -647,8 +647,7 @@
         if (!isVisible(ta)) continue;
         const id = ta.id || '';
         
-        // Отсекаем журнал (C27) и ищем только поле решения (C38 или text_longtext)
-        if (id.includes('text_longtext') && !id.includes('C27_W84_V85_V87')) {
+        if (id.includes('text_longtext')) {
           if (doc === preferredDoc) {
              bestMatch = { doc, win, el: ta, depth };
              return;
@@ -1263,7 +1262,7 @@
     realClick(solItem);
     await waitForNetIdle(2000, 15000);
 
-    // Ждем появления textarea решения (игнорируя C27)
+    // v1.57: Ждем появления textarea решения (принимаем и C27, и C38)
     const fieldReady = await waitForCondition(() => {
       const s = findSolutionTextarea(getFormDoc(state.currentDesc));
       return s.r && isVisible(s.r.el);
