@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.57
+// @version      1.58
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -635,7 +635,7 @@
     return norm(el.value) === norm(value);
   }
 
-  // v1.57: Убран жесткий запрет на C27. Теперь ищется любой видимый textarea с суффиксом text_longtext.
+  // Поиск поля решения. Принимает любой видимый textarea с суффиксом text_longtext.
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
@@ -1027,8 +1027,9 @@
       ui.startRow.value = suggestedStart;
       log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из LocalStorage)' : ''}.`);
     } else {
-      const curVal = String(ui.startRow.value || '').trim();
-      if (curVal === '' || curVal === '1') {
+      const curVal = parseInt(ui.startRow.value, 10) || 1;
+      // v1.58: Если сохраненная строка выше текущей - принудительно обновляем
+      if (curVal === 1 || suggestedStart > curVal) {
         ui.startRow.value = suggestedStart;
         if (savedMatches) log(`Продолжаем с Excel#${suggestedStart} (из LocalStorage).`);
       }
@@ -1262,7 +1263,7 @@
     realClick(solItem);
     await waitForNetIdle(2000, 15000);
 
-    // v1.57: Ждем появления textarea решения (принимаем и C27, и C38)
+    // Ждем появления textarea решения (принимаем и C27, и C38)
     const fieldReady = await waitForCondition(() => {
       const s = findSolutionTextarea(getFormDoc(state.currentDesc));
       return s.r && isVisible(s.r.el);
@@ -1501,6 +1502,15 @@
         ok(`✅ Excel#${item.excelRowNum} — сохранено в LocalStorage`);
         state.idx++;
         updateStat();
+        ui.prog.value = state.idx;
+        
+        // v1.58: Обновляем поле ввода на следующую строку
+        if (state.idx < state.rows.length) {
+          ui.startRow.value = state.rows[state.idx].excelRowNum;
+        } else {
+          ui.startRow.value = item.excelRowNum + 1;
+        }
+        
       } catch (e) {
         if (e && e.name === 'SMStoppedError') {
           warn(`⏹ Остановлено пользователем на Excel#${item.excelRowNum}`);
@@ -1538,7 +1548,13 @@
       const curExcel = state.rows[state.idx].excelRowNum;
       ui.startRow.value = curExcel;
       log(`⏹ Стоп → «Начать со строки» = ${curExcel} (Excel#${curExcel})`);
-    } else log('⏹ Стоп');
+    } else if (state.rows && state.rows.length > 0) {
+      const lastRow = state.rows[state.rows.length - 1].excelRowNum + 1;
+      ui.startRow.value = lastRow;
+      log(`⏹ Стоп → «Начать со строки» = ${lastRow} (Excel#${lastRow})`);
+    } else {
+      log('⏹ Стоп');
+    }
   });
 
   log(`Скрипт загружен (v${SCRIPT_VERSION}). Выберите XLSX-файл.`);
