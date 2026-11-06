@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.50
+// @version      1.52
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -374,8 +374,7 @@
 
   function findEl(id) { const r = findInFrames(id); return r ? r.el : null; }
 
-  // ==================== v1.47: ХЕЛПЕРЫ ТЕКУЩЕГО ФРЕЙМА ====================
-  
+  // ==================== ХЕЛПЕРЫ ТЕКУЩЕГО ФРЕЙМА ====================
   function findInDoc(doc, id) {
     if (!doc) return null;
     try { const el = doc.getElementById(id); if (el) return el; } catch (e) {}
@@ -470,7 +469,7 @@
   }
   function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
-  async function waitForNetIdle(idleMs = 1000, timeoutMs = 20000) {
+  async function waitForNetIdle(idleMs = 2000, timeoutMs = 30000) {
     const t0 = Date.now();
     let lastLog = 0;
     while (Date.now() - t0 < timeoutMs) {
@@ -625,20 +624,12 @@
     return norm(el.value) === norm(value);
   }
 
-  // v1.50: строгий поиск поля решения, без захвата журнала C27_...
+  // Строгий поиск поля решения с обработкой динамических префиксов
   function findSolutionTextarea(preferredDoc) {
     if (preferredDoc) {
-      let el = preferredDoc.getElementById('C38_W62_V63_V65_text_longtext');
+      let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_text_longtext');
       if (el && el.tagName === 'TEXTAREA' && isVisible(el)) {
         return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
-      }
-      let tas = preferredDoc.querySelectorAll('textarea');
-      for (const ta of tas) {
-        if (!isVisible(ta)) continue;
-        const id = ta.id || '';
-        if (id.includes('text_longtext') && !id.includes('C27_W84_V85_V87')) {
-          return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el: ta, depth: 0 }, id: ta.id };
-        }
       }
     }
     let found = null;
@@ -910,7 +901,7 @@
     fileBuffer: null, fileName: null, parsedFrom: null,
     lastFilledExcelRow: null, totalFilled: 0,
     allRows: null,
-    currentDesc: '' // v1.47: ожидаемое описание текущего инцидента
+    currentDesc: ''
   };
 
   function loadSavedState() {
@@ -1126,7 +1117,7 @@
   async function transferOne(item) {
     const d = parseRow(item.cells);
     if (!d.desc) d.desc = `Инцидент Excel#${item.excelRowNum}`;
-    state.currentDesc = d.desc; // v1.47
+    state.currentDesc = d.desc;
     if (!d.num) throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
     log(`▶ Excel#${item.excelRowNum}: ${d.desc} | номер="${d.num}"`);
 
@@ -1199,7 +1190,7 @@
     if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
     
-    await waitForNetIdle(1000, 30000); // v1.49
+    await waitForNetIdle(2000, 30000);
 
     const editAppeared = await waitForCondition(
       () => {
@@ -1222,7 +1213,7 @@
         const saveBtn3 = formDocC3 ? findInDoc(formDocC3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
         if (saveBtn3) {
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
-            await waitForNetIdle(1000, 20000);
+            await waitForNetIdle(2000, 20000);
             const back = await waitForCondition(
               () => {
                 const doc = getFormDoc(state.currentDesc);
@@ -1252,16 +1243,16 @@
     if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
 
     realClick(solItem);
-    await waitForNetIdle(1000, 15000); // v1.49: ждем открытия поля
+    await waitForNetIdle(2000, 15000);
 
-    // v1.50: строго ждем появления именно C38_..._text_longtext
+    // Ждем появления textarea решения с учетом динамических префиксов
     const fieldReady = await waitForCondition(() => {
       const doc = getFormDoc(state.currentDesc);
       if (!doc) return false;
-      const el = doc.getElementById('C38_W62_V63_V65_text_longtext');
+      const el = findInDoc(doc, 'C38_W62_V63_V65_text_longtext');
       if (!el) return false;
       return el.tagName === 'TEXTAREA' && isVisible(el);
-    }, 25000, 200, 'появление textarea решения');
+    }, 30000, 200, 'появление textarea решения');
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
       throw new Error('E.1: после «Решение» не появилось textarea');
@@ -1285,11 +1276,11 @@
       throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
     }
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
-    await waitForNetIdle(500, 5000); // v1.49
+    await waitForNetIdle(1000, 5000);
 
     if (!isIncidentFormVisible()) {
       dumpDiagnostics('E.2-form-lost-after-text');
-      throw new Error('E.2: форма инцидента не видна после записи текста — SAP «улетел» на Home. Текст записан, статус E0005 не установлен.');
+      throw new Error('E.2: форма инцидента не видна после записи текста — SAP «улетел» на Home.');
     }
 
     // ============ C.2: «Обработать» ============
@@ -1310,9 +1301,8 @@
     }, 30000, 200, 'EDIT button interactive and clicked');
 
     if (!editClicked) throw new Error('C.2: не удалось кликнуть «Обработать» (кнопка не готова)');
-    await waitForNetIdle(1000, 30000); // v1.49: ждем завершения POST
+    await waitForNetIdle(2000, 30000);
 
-    // v1.50: ждем, пока кнопка Сохранить станет АКТИВНОЙ (не disabled)
     const saveReady = await waitForCondition(() => {
         const doc = getFormDoc(state.currentDesc);
         if (!doc) return false;
@@ -1345,7 +1335,7 @@
       throw new Error(`E.2b: не удалось установить статус "${stLabel2}"`);
     }
     ok('  ✔ Статус E0005 установлен.');
-    await waitForNetIdle(1000, 15000); // v1.49
+    await waitForNetIdle(1000, 15000);
     await debugPause('После E0005');
     checkStop();
 
@@ -1357,7 +1347,7 @@
     if (!nativeSubmitButton(saveBtn2, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (E.3)');
     
-    await waitForNetIdle(1000, 30000); // v1.49
+    await waitForNetIdle(2000, 30000);
 
     const backView = await waitForCondition(
       () => {
