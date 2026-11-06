@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.47
+// @version      1.48
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -64,7 +64,7 @@
             }
           }
         } catch (e) {}
-        if (isSapPost) window.__SM_LAST_POST_TS__ = Date.now(); // v1.46
+        if (isSapPost) window.__SM_LAST_POST_TS__ = Date.now();
         this.addEventListener('load', function() {
           const url = this.responseURL || '';
           if (url.indexOf('BSPWDApplication.do') >= 0) window.__SM_LAST_POST_TS__ = Date.now();
@@ -375,7 +375,6 @@
 
   // ==================== v1.47: ХЕЛПЕРЫ ТЕКУЩЕГО ФРЕЙМА ====================
   
-  // Поиск по id только в конкретном документе (без обхода фреймов)
   function findInDoc(doc, id) {
     if (!doc) return null;
     try { const el = doc.getElementById(id); if (el) return el; } catch (e) {}
@@ -387,7 +386,6 @@
     return null;
   }
 
-  // Поиск актуального документа формы инцидента по ожидаемому описанию
   function getFormDoc(expectedDesc) {
     if (expectedDesc === undefined) expectedDesc = state.currentDesc;
     let bestDoc = null;
@@ -427,7 +425,6 @@
     return bestDoc;
   }
 
-  // Парсинг __items в конкретном документе
   function parseDropdownItemsInDoc(doc, itemsId) {
     const byId = {};
     if (!doc) return { byId };
@@ -448,7 +445,6 @@
     return { byId };
   }
 
-  // Получение label из __items текущей формы
   function getLabelInFormFrame(itemsId, key, expectedDesc) {
     const doc = getFormDoc(expectedDesc);
     if (!doc) return null;
@@ -1217,7 +1213,6 @@
     if (!nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
       throw new Error('Не могу нажать «Сохранить» (C.1)');
     
-    // Ждем перехода в режим просмотра (появление кнопки «Обработать»)
     const editAppeared = await waitForCondition(
       () => {
         const doc = getFormDoc(state.currentDesc);
@@ -1230,46 +1225,6 @@
     await debugPause('После создания инцидента');
     checkStop();
 
-    // ============ C.2: «Обработать» ============
-    log('C.2: «Обработать»...');
-    const formDocC2 = getFormDoc(state.currentDesc);
-    if (!formDocC2) throw new Error('C.2: текущая форма не найдена');
-    
-    let editBtn = findInDoc(formDocC2, 'C32_W39_V41_EDIT');
-    if (!editBtn) throw new Error('Нет кнопки «Обработать» (C.2)');
-
-    // v1.47: дожидаемся, пока SAP навесит обработчик onclick (иначе realClick не сработает)
-    await waitForCondition(() => {
-        const oc = editBtn.getAttribute('onclick') || '';
-        return oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit');
-    }, 10000, 100, 'EDIT button interactive');
-
-    if (!nativeSubmitButton(editBtn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0))
-      throw new Error('Не могу нажать «Обработать» (C.2)');
-
-    // v1.47: главный маркер edit-mode — появление кнопки SAVE (Сохранить)
-    const editReady = await waitForCondition(() => {
-        const doc = getFormDoc(state.currentDesc);
-        if (!doc) return false;
-        const saveBtn = findInDoc(doc, 'C32_W39_V41_SAVE');
-        return saveBtn && isVisible(saveBtn);
-    }, 30000, 200, 'SAVE button visible (edit mode)');
-
-    if (!editReady) throw new Error('C.2: форма не перешла в edit-mode (нет кнопки SAVE)');
-
-    // Проверяем E0005 строго в этом фрейме
-    const formDocC2b = getFormDoc(state.currentDesc);
-    const e0005Ready = formDocC2b &&
-      parseDropdownItemsInDoc(formDocC2b, stId + '__items').byId[CFG.status.solution];
-    if (!e0005Ready) {
-      const items = formDocC2b ? parseDropdownItemsInDoc(formDocC2b, stId + '__items').byId : {};
-      dbg(`    [diag] __items после EDIT (форма): ${JSON.stringify(items).slice(0, 400)}`);
-      throw new Error('После EDIT в __items не появился E0005');
-    }
-    ok('  ✔ Режим редактирования.');
-    await debugPause('После «Обработать»');
-    checkStop();
-
     if (!okLongBefore) {
       log('C.3: Fallback — длинный текст "до" после Обработать...');
       okLongBefore = await fillLongTextWithRetries(d.longTextBefore, 3, 'C.3');
@@ -1280,7 +1235,12 @@
         if (saveBtn3) {
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
             const back = await waitForCondition(
-              () => { const el = findEl('C32_W39_V41_EDIT'); return !!(el && isVisible(el)); },
+              () => {
+                const doc = getFormDoc(state.currentDesc);
+                if (!doc) return false;
+                const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+                return btn && isVisible(btn);
+              },
               20000, 200, 'перезагрузка после SAVE (C.3)');
             if (back) ok('  ✔ "До" сохранено (fallback).');
             else warn('  ⚠ C.3: после SAVE нет кнопки «Обработать»');
@@ -1339,9 +1299,44 @@
       throw new Error('E.2: форма инцидента не видна после записи текста — SAP «улетел» на Home. Текст записан, статус E0005 не установлен.');
     }
 
+    // ============ C.2: «Обработать» ============
+    log('C.2: «Обработать»...');
+    let editClicked = false;
+    await waitForCondition(() => {
+        const doc = getFormDoc(state.currentDesc);
+        if (!doc) return false;
+        const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+        if (!btn || !isVisible(btn)) return false;
+        const oc = btn.getAttribute('onclick') || '';
+        if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) {
+            nativeSubmitButton(btn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
+            editClicked = true;
+            return true;
+        }
+        return false;
+    }, 30000, 200, 'EDIT button interactive and clicked');
+
+    if (!editClicked) throw new Error('C.2: не удалось кликнуть «Обработать» (кнопка не готова)');
+
+    const e0005Ready = await waitForCondition(() => {
+        const doc = getFormDoc(state.currentDesc);
+        if (!doc) return false;
+        return parseDropdownItemsInDoc(doc, stId + '__items').byId[CFG.status.solution] !== undefined;
+    }, 30000, 200, 'E0005 in __items (edit mode)');
+
+    if (!e0005Ready) {
+        const doc = getFormDoc(state.currentDesc);
+        const items = doc ? parseDropdownItemsInDoc(doc, stId + '__items').byId : {};
+        dbg(`    [diag] __items после EDIT (форма): ${JSON.stringify(items).slice(0, 400)}`);
+        throw new Error('После EDIT в __items не появился E0005');
+    }
+    ok('  ✔ Режим редактирования.');
+    await debugPause('После «Обработать»');
+    checkStop();
+
     // ============ E.2b: Статус E0005 ============
     log('E.2b: Статус E0005...');
-    await waitForNetIdle(500, 15000); // v1.46
+    await waitForNetIdle(500, 15000);
 
     {
       const formDocE2b = getFormDoc(state.currentDesc);
@@ -1353,18 +1348,18 @@
       }
     }
 
-    const formDocE2b = getFormDoc(state.currentDesc);
-    if (!formDocE2b) throw new Error('E.2b: текущая форма не найдена');
+    const formDocE2b2 = getFormDoc(state.currentDesc);
+    if (!formDocE2b2) throw new Error('E.2b: текущая форма не найдена');
     
-    const stLabel2 = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId[CFG.status.solution];
+    const stLabel2 = parseDropdownItemsInDoc(formDocE2b2, stId + '__items').byId[CFG.status.solution];
     if (!stLabel2) {
-      const items = parseDropdownItemsInDoc(formDocE2b, stId + '__items').byId;
+      const items = parseDropdownItemsInDoc(formDocE2b2, stId + '__items').byId;
       const keys = Object.keys(items);
       dumpDiagnostics('E.2b-no-E0005');
       throw new Error(`E.2b: E0005 нет в __items текущей формы (есть: ${keys.length ? keys.join(',') : 'ничего'})`);
     }
 
-    if (!await setDropdownByLabel(stId, stLabel2, formDocE2b)) {
+    if (!await setDropdownByLabel(stId, stLabel2, formDocE2b2)) {
       if (!isIncidentFormVisible()) {
         dumpDiagnostics('E.2b-form-lost-during-dropdown');
         throw new Error('E.2b: форма исчезла во время клика по статусу E0005');
