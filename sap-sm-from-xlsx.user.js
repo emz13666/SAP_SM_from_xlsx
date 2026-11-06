@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.55
+// @version      1.56
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -635,34 +635,32 @@
     return norm(el.value) === norm(value);
   }
 
-  // Строгий поиск поля решения. Никаких C27 (журнала)!
+  // Строгий поиск поля решения. Игнорируем журнал (C27_...).
   function findSolutionTextarea(preferredDoc) {
-    if (preferredDoc) {
-      let el = findInDoc(preferredDoc, 'C38_W62_V63_V65_text_longtext');
-      if (el && el.tagName === 'TEXTAREA' && isVisible(el)) {
-        return { r: { doc: preferredDoc, win: preferredDoc.defaultView, el, depth: 0 }, id: el.id };
-      }
-    }
-    
-    let r = findInFrames('C38_W62_V63_V65_text_longtext');
-    if (r && r.el && r.el.tagName === 'TEXTAREA' && isVisible(r.el)) {
-      return { r, id: r.el.id };
-    }
-    
-    // Запасной поиск среди всех textarea, исключая C27
-    let found = null;
+    let bestMatch = null;
+
     walkFrames((doc, win, depth) => {
-      if (found) return;
+      if (bestMatch && bestMatch.doc === preferredDoc) return; // Если уже нашли в целевом фрейме
+
       let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
       for (const ta of tas) {
         if (!isVisible(ta)) continue;
         const id = ta.id || '';
+        
+        // Отсекаем журнал (C27) и ищем только поле решения (C38 или text_longtext)
         if (id.includes('text_longtext') && !id.includes('C27_W84_V85_V87')) {
-          found = { doc, win, el: ta, depth }; return;
+          if (doc === preferredDoc) {
+             bestMatch = { doc, win, el: ta, depth };
+             return;
+          }
+          if (!bestMatch) {
+             bestMatch = { doc, win, el: ta, depth };
+          }
         }
       }
     });
-    if (found) return { r: found, id: found.el.id };
+
+    if (bestMatch) return { r: bestMatch, id: bestMatch.el.id };
     return { r: null, id: null };
   }
 
@@ -1265,7 +1263,7 @@
     realClick(solItem);
     await waitForNetIdle(2000, 15000);
 
-    // Ждем появления textarea решения строго по ID
+    // Ждем появления textarea решения (игнорируя C27)
     const fieldReady = await waitForCondition(() => {
       const s = findSolutionTextarea(getFormDoc(state.currentDesc));
       return s.r && isVisible(s.r.el);
