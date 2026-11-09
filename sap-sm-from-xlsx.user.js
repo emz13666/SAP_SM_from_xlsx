@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.58
+// @version      1.59
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -198,6 +198,7 @@
         <button id="sm-pause" disabled>⏸ Пауза</button>
         <button id="sm-continue" disabled>⏭ Продолжить</button>
         <button id="sm-stop"  disabled>⏹ Стоп</button>
+        <button id="sm-abort" disabled>✖ Прервать</button>
       </div>
       <progress id="sm-progress" value="0" max="0"></progress>
       <div id="sm-stat" class="row">Ожидание файла…</div>
@@ -210,7 +211,7 @@
     file: $('#sm-file'), fileName: $('#sm-fileName'), savedInfo: $('#sm-savedInfo'),
     startRow: $('#sm-startRow'), startRowLabel: $('#sm-startRowLabel'),
     step: $('#sm-step'), debugActions: $('#sm-debugActions'), verboseLog: $('#sm-verboseLog'),
-    start: $('#sm-start'), pause: $('#sm-pause'), cont: $('#sm-continue'), stop: $('#sm-stop'),
+    start: $('#sm-start'), pause: $('#sm-pause'), cont: $('#sm-continue'), stop: $('#sm-stop'), abort: $('#sm-abort'),
     prog: $('#sm-progress'), stat: $('#sm-stat'), log: $('#sm-log'), title: $('#sm-title'),
   };
 
@@ -911,7 +912,7 @@
 
   // ==================== СОСТОЯНИЕ ====================
   const state = {
-    rows: [], idx: 0, running: false, paused: false, stopped: false,
+    rows: [], idx: 0, running: false, paused: false, stopped: false, stopRequested: false,
     stats: { ok: 0, warn: 0, err: 0 },
     fileBuffer: null, fileName: null, parsedFrom: null,
     lastFilledExcelRow: null, totalFilled: 0,
@@ -1028,7 +1029,7 @@
       log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из LocalStorage)' : ''}.`);
     } else {
       const curVal = parseInt(ui.startRow.value, 10) || 1;
-      // v1.58: Если сохраненная строка выше текущей - принудительно обновляем
+      // Если сохраненная строка выше текущей - принудительно обновляем
       if (curVal === 1 || suggestedStart > curVal) {
         ui.startRow.value = suggestedStart;
         if (savedMatches) log(`Продолжаем с Excel#${suggestedStart} (из LocalStorage).`);
@@ -1286,11 +1287,15 @@
     }
     log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
 
-    if (!setElementValue(sol.r.el, d.longTextSolution, false, false)) {
+    // v1.59: Принудительно вызываем input и change, и убираем фокус, чтобы SAP зафиксировал изменения
+    if (!setElementValue(sol.r.el, d.longTextSolution, true, true)) {
       dumpDiagnostics('E.2-write-failed');
       throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
     }
+    try { sol.r.el.blur(); } catch(e) {}
+    
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
+    await sleep(300); // Даём SAP обработать
     await waitForNetIdle(1000, 5000);
 
     if (!isIncidentFormVisible()) {
@@ -1436,12 +1441,12 @@
   }
 
   async function runLoop() {
-    state.running = true; state.stopped = false; state.paused = false;
+    state.running = true; state.stopped = false; state.paused = false; state.stopRequested = false;
     state.stats = { ok: 0, warn: 0, err: 0 };
-    ui.start.disabled = true; ui.pause.disabled = false; ui.stop.disabled = false;
+    ui.start.disabled = true; ui.pause.disabled = false; ui.stop.disabled = false; ui.abort.disabled = false;
     ui.pause.textContent = '⏸ Пауза';
 
-    if (!state.fileBuffer) { err('Файл не выбран.'); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return; }
+    if (!state.fileBuffer) { err('Файл не выбран.'); state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; ui.abort.disabled = true; return; }
 
     await sleep(50);
 
@@ -1460,7 +1465,7 @@
         catch (ex) {
           ui.start.textContent = '▶ Старт';
           err('Ошибка перечитывания: ' + ex.message);
-          state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
+          state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; ui.abort.disabled = true;
           return;
         }
         state.allRows = info.allRows;
@@ -1477,7 +1482,7 @@
     }
     if (state.rows.length === 0) {
       err(`Нет строк для обработки (старт Excel#${effectiveStart}, последняя #${state.lastFilledExcelRow}).`);
-      state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; return;
+      state.running = false; ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; ui.abort.disabled = true; return;
     }
 
     state.idx = 0;
@@ -1504,13 +1509,12 @@
         updateStat();
         ui.prog.value = state.idx;
         
-        // v1.58: Обновляем поле ввода на следующую строку
+        // Обновляем поле ввода на следующую строку
         if (state.idx < state.rows.length) {
           ui.startRow.value = state.rows[state.idx].excelRowNum;
         } else {
           ui.startRow.value = item.excelRowNum + 1;
         }
-        
       } catch (e) {
         if (e && e.name === 'SMStoppedError') {
           warn(`⏹ Остановлено пользователем на Excel#${item.excelRowNum}`);
@@ -1521,6 +1525,14 @@
         err(`✖ [${state.idx + 1}] ${e.message}. Останов.`);
         state.stopped = true; break;
       }
+      
+      // Мягкий стоп (после текущей строки)
+      if (state.stopRequested) {
+        log(`⏹ Запрошен мягкий стоп. Завершаем после Excel#${item.excelRowNum}.`);
+        state.stopped = true;
+        break;
+      }
+
       if (ui.step.checked) await waitForManual(`Строка ${state.idx} готова. Проверьте SAP и нажмите «Продолжить».`);
       await sleep(3000);
     }
@@ -1528,7 +1540,7 @@
     state.running = false;
     ui.startRowLabel.textContent = 'Начать со строки:';
     ui.startRow.readOnly = false;
-    ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true;
+    ui.start.disabled = false; ui.pause.disabled = true; ui.stop.disabled = true; ui.abort.disabled = true;
     ui.pause.textContent = '⏸ Пауза';
     log(state.stopped
       ? `⏹ Остановлено — ✅ ${state.stats.ok} / ⚠ ${state.stats.warn} / ✖ ${state.stats.err}`
@@ -1541,19 +1553,30 @@
     state.paused = !state.paused;
     ui.pause.textContent = state.paused ? '▶ Продолжить' : '⏸ Пауза';
   });
+  
   ui.stop.addEventListener('click', () => {
+    if (state.stopRequested) return;
+    state.stopRequested = true;
+    log('⏹ Запрошен мягкий стоп (после текущей строки)...');
+    ui.stop.disabled = true;
+  });
+
+  ui.abort.addEventListener('click', () => {
     state.stopped = true;
+    state.stopRequested = false;
     state.paused = false;
+    ui.stop.disabled = true;
+    ui.abort.disabled = true;
     if (state.rows && state.rows.length > 0 && state.idx >= 0 && state.idx < state.rows.length) {
       const curExcel = state.rows[state.idx].excelRowNum;
       ui.startRow.value = curExcel;
-      log(`⏹ Стоп → «Начать со строки» = ${curExcel} (Excel#${curExcel})`);
+      log(`✖ Прервано → «Начать со строки» = ${curExcel} (Excel#${curExcel})`);
     } else if (state.rows && state.rows.length > 0) {
       const lastRow = state.rows[state.rows.length - 1].excelRowNum + 1;
       ui.startRow.value = lastRow;
-      log(`⏹ Стоп → «Начать со строки» = ${lastRow} (Excel#${lastRow})`);
+      log(`✖ Прервано → «Начать со строки» = ${lastRow} (Excel#${lastRow})`);
     } else {
-      log('⏹ Стоп');
+      log('✖ Прервано');
     }
   });
 
