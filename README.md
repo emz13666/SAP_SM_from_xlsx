@@ -1,9 +1,5 @@
 # SAP SM: XLSX → Incident (Выполненные работы)
 
-![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Userscript-green)
-![SAP Solution Manager](https://img.shields.io/badge/SAP-Solution%20Manager-blue)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
-
 Userscript (Tampermonkey) для автоматического переноса строк из Excel-файла (лист «Выполненные работы») в SAP Solution Manager (CRM WebClient UI) в качестве инцидентов `AIC_OB_INCIDENT`.
 
 Скрипт полностью автоматизирует рутину: заполняет заголовок, настраивает партнеров, выбирает категории и статусы, добавляет длинные тексты (описание и решение) и сохраняет инциденты.
@@ -24,7 +20,7 @@ Userscript (Tampermonkey) для автоматического переноса
 
 1. Браузер на базе Chromium (Edge, Chrome, Яндекс.Браузер) или Firefox.
 2. Установленное расширение [Tampermonkey](https://www.tampermonkey.net/).
-3. Доступ к SAP Solution Manager (домены `sapsm3.sap.metinvest.com` или `sapsm3ci.sap.metinvest.com`).
+3. Доступ к SAP Solution Manager (домены указать свои).
 
 ## 🔧 Установка
 
