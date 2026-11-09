@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.59
+// @version      1.60
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -1262,9 +1262,9 @@
     if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
 
     realClick(solItem);
-    await waitForNetIdle(2000, 15000);
+    await sleep(500);
+    await waitForNetIdle(1000, 15000); // Ждём, пока форма перерисуется
 
-    // Ждем появления textarea решения (принимаем и C27, и C38)
     const fieldReady = await waitForCondition(() => {
       const s = findSolutionTextarea(getFormDoc(state.currentDesc));
       return s.r && isVisible(s.r.el);
@@ -1279,6 +1279,19 @@
 
     // ============ E.2: Текст решения ============
     log('E.2: Текст решения...');
+    
+    // Функция для записи текста с генерацией всех событий SAP
+    const writeSolution = (textarea) => {
+        textarea.focus();
+        textarea.value = '';
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.value = d.longTextSolution;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+        textarea.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a', keyCode: 65 }));
+        textarea.blur();
+    };
+
     const formDocE2 = getFormDoc(state.currentDesc);
     let sol = findSolutionTextarea(formDocE2);
     if (!sol.r) {
@@ -1287,16 +1300,25 @@
     }
     log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
 
-    // v1.59: Принудительно вызываем input и change, и убираем фокус, чтобы SAP зафиксировал изменения
-    if (!setElementValue(sol.r.el, d.longTextSolution, true, true)) {
-      dumpDiagnostics('E.2-write-failed');
-      throw new Error(`E.2: не удалось записать текст решения в "${sol.id || '(no-id)'}"`);
-    }
-    try { sol.r.el.blur(); } catch(e) {}
-    
+    writeSolution(sol.r.el);
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
-    await sleep(300); // Даём SAP обработать
+    
+    await sleep(300);
     await waitForNetIdle(1000, 5000);
+
+    // Проверяем, не затёрло ли поле при асинхронном рендере (баг v1.59)
+    const solVerify = findSolutionTextarea(getFormDoc(state.currentDesc));
+    if (!solVerify.r) {
+        throw new Error('E.2: поле решения пропало после записи');
+    }
+    
+    if (solVerify.r.el.value !== d.longTextSolution) {
+        log(`  ⚠ Текст решения исчез после рендера, записываем заново...`);
+        writeSolution(solVerify.r.el);
+        await sleep(300);
+        await waitForNetIdle(1000, 5000);
+        log(`  ✔ Текст решения записан заново (${(solVerify.r.el.value || '').length} симв.)`);
+    }
 
     if (!isIncidentFormVisible()) {
       dumpDiagnostics('E.2-form-lost-after-text');
