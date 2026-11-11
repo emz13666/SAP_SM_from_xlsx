@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.62
+// @version      1.63
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -922,7 +922,7 @@
     currentDesc: ''
   };
 
-  // v1.62: Загрузка с миграцией из localStorage
+  // Загрузка с миграцией из localStorage
   function loadSavedState() {
     try {
       let raw = typeof GM_getValue === 'function' ? GM_getValue(CFG.lsKey, null) : null;
@@ -1275,31 +1275,53 @@
       } else warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
     }
 
-    // ============ E.1: Добавить текст → Решение ============
+    // ============ E.1: Добавить текст → Решение (с 3 попытками) ============
     log('E.1: «Добавить текст» → «Решение»...');
-    const formDocE1 = getFormDoc(state.currentDesc);
-    let menuBtn = formDocE1 ? findTextAddButton(formDocE1) : null;
-    if (!menuBtn) menuBtn = findTextAddButton(null);
-    if (!menuBtn) throw new Error('Кнопка «Добавить текст» не найдена');
-    try { menuBtn.scrollIntoView({ block: 'center' }); } catch(e) {}
+    let fieldReady = false;
+    const maxE1Attempts = 3;
+    
+    for (let attempt = 1; attempt <= maxE1Attempts; attempt++) {
+      checkStop();
+      const formDocE1 = getFormDoc(state.currentDesc);
+      let menuBtn = formDocE1 ? findTextAddButton(formDocE1) : null;
+      if (!menuBtn) menuBtn = findTextAddButton(null);
+      
+      if (!menuBtn) {
+        log(`  [E.1] Кнопка «Добавить текст» не найдена (попытка ${attempt}/${maxE1Attempts}). Ждём...`);
+        await sleep(2000);
+        continue;
+      }
+      try { menuBtn.scrollIntoView({ block: 'center' }); } catch(e) {}
 
-    const solItem = await waitForSolutionMenuItem(menuBtn, CFG.textAddTimeoutMs, formDocE1);
-    checkStop();
-    if (!solItem) throw new Error(`пункт «Решение» не появился за ${Math.round(CFG.textAddTimeoutMs/1000)} с`);
+      const solItem = await waitForSolutionMenuItem(menuBtn, 10000, formDocE1);
+      checkStop();
+      
+      if (!solItem) {
+        log(`  ⚠ [E.1] пункт «Решение» не появился (попытка ${attempt}/${maxE1Attempts}).`, 'color:#ff0');
+        continue;
+      }
 
-    realClick(solItem);
-    await sleep(500);
-    await waitForNetIdle(1000, 15000); // Ждём, пока форма перерисуется
+      realClick(solItem);
+      await sleep(500);
+      await waitForNetIdle(1000, 5000); // Ждём, пока форма перерисуется
 
-    const fieldReady = await waitForCondition(() => {
-      const s = findSolutionTextarea(getFormDoc(state.currentDesc));
-      return s.r && isVisible(s.r.el);
-    }, 30000, 200, 'появление textarea решения');
+      fieldReady = await waitForCondition(() => {
+        const s = findSolutionTextarea(getFormDoc(state.currentDesc));
+        return s.r && isVisible(s.r.el);
+      }, 15000, 200, `появление textarea (попытка ${attempt})`);
+
+      if (fieldReady) {
+        ok('  ✔ «Решение» выбрано.');
+        break;
+      } else {
+        log(`  ⚠ [E.1] textarea не появилось (попытка ${attempt}/${maxE1Attempts}).`, 'color:#ff0');
+      }
+    }
+
     if (!fieldReady) {
       dumpDiagnostics('E.1-no-textarea');
-      throw new Error('E.1: после «Решение» не появилось textarea');
+      throw new Error('E.1: после «Решение» не появилось textarea (все попытки исчерпаны)');
     }
-    ok('  ✔ «Решение» выбрано.');
     await debugPause('После «Решение»');
     checkStop();
 
