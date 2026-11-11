@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.61
+// @version      1.62
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -922,12 +922,24 @@
     currentDesc: ''
   };
 
-  // v1.61: Используем GM_setValue / GM_getValue для кросс-доменного хранения
+  // v1.62: Загрузка с миграцией из localStorage
   function loadSavedState() {
     try {
-      const raw = typeof GM_getValue === 'function' ? GM_getValue(CFG.lsKey, null) : localStorage.getItem(CFG.lsKey);
+      let raw = typeof GM_getValue === 'function' ? GM_getValue(CFG.lsKey, null) : null;
+      
+      // Если в GM пусто, пробуем localStorage (миграция)
+      if (!raw) {
+        const lsRaw = localStorage.getItem(CFG.lsKey);
+        if (lsRaw) {
+          raw = lsRaw;
+          if (typeof GM_setValue === 'function') {
+            try { GM_setValue(CFG.lsKey, JSON.parse(lsRaw)); } catch(e){}
+          }
+        }
+      }
+
       if (!raw) return null;
-      const obj = typeof raw === 'string' ? JSON.parse(raw) : raw; // поддержка старого формата из localStorage
+      const obj = typeof raw === 'string' ? JSON.parse(raw) : raw; 
       if (!obj || typeof obj !== 'object' || !obj.fileName) return null;
       return obj;
     } catch (e) { return null; }
@@ -1020,6 +1032,10 @@
     const saved = loadSavedState();
     const savedMatches = saved && saved.fileName === newName;
     const lastSavedExcel = savedMatches ? (Number(saved.lastExcelRow) || 0) : 0;
+
+    // Диагностический лог
+    log(`[Diag] Сохранение: ${saved ? `"${saved.fileName}", строка ${saved.lastExcelRow}` : 'не найдено'}`);
+    log(`[Diag] Совпадение файла: ${savedMatches}, lastSavedExcel = ${lastSavedExcel}`);
 
     let suggestedStart = 1;
     if (lastSavedExcel > 0 && info.totalFilled) {
@@ -1536,7 +1552,7 @@
         await transferOne(item);
         state.stats.ok++;
         saveState(state.fileName, item.excelRowNum);
-        ok(`✅ Excel#${item.excelRowNum} — сохранено`);
+        ok(`✅ Excel#${item.excelRowNum} — сохранено в памяти скрипта`);
         state.idx++;
         updateStat();
         ui.prog.value = state.idx;
