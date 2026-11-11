@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.60
+// @version      1.61
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
 // @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
 // @grant        GM_addStyle
 // @grant        GM_info
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @run-at       document-idle
 // @downloadURL  https://raw.githubusercontent.com/emz13666/SAP_SM_from_xlsx/main/sap-sm-from-xlsx.user.js
 // @updateURL    https://raw.githubusercontent.com/emz13666/SAP_SM_from_xlsx/main/sap-sm-from-xlsx.user.js
@@ -920,11 +922,12 @@
     currentDesc: ''
   };
 
+  // v1.61: Используем GM_setValue / GM_getValue для кросс-доменного хранения
   function loadSavedState() {
     try {
-      const raw = localStorage.getItem(CFG.lsKey);
+      const raw = typeof GM_getValue === 'function' ? GM_getValue(CFG.lsKey, null) : localStorage.getItem(CFG.lsKey);
       if (!raw) return null;
-      const obj = JSON.parse(raw);
+      const obj = typeof raw === 'string' ? JSON.parse(raw) : raw; // поддержка старого формата из localStorage
       if (!obj || typeof obj !== 'object' || !obj.fileName) return null;
       return obj;
     } catch (e) { return null; }
@@ -932,16 +935,23 @@
 
   function saveState(fileName, lastExcelRow) {
     if (!fileName) return;
-    try { localStorage.setItem(CFG.lsKey, JSON.stringify({ fileName, lastExcelRow })); } catch (e) {}
+    try {
+      const val = { fileName, lastExcelRow };
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(CFG.lsKey, val);
+      } else {
+        localStorage.setItem(CFG.lsKey, JSON.stringify(val));
+      }
+    } catch (e) {}
   }
 
   function refreshSavedInfo(fileName) {
     const saved = loadSavedState();
     if (!saved) { ui.savedInfo.textContent = ''; return; }
     if (fileName && saved.fileName === fileName) {
-      ui.savedInfo.textContent = `В LocalStorage: этот файл, последняя успешная строка Excel#${saved.lastExcelRow}.`;
+      ui.savedInfo.textContent = `В памяти скрипта: этот файл, последняя успешная строка Excel#${saved.lastExcelRow}.`;
     } else {
-      ui.savedInfo.textContent = `В LocalStorage: другой файл (${saved.fileName}), строка Excel#${saved.lastExcelRow}. Подсказка не применится.`;
+      ui.savedInfo.textContent = `В памяти скрипта: другой файл (${saved.fileName}), строка Excel#${saved.lastExcelRow}. Подсказка не применится.`;
     }
   }
 
@@ -1026,13 +1036,13 @@
 
     if (fileChanged) {
       ui.startRow.value = suggestedStart;
-      log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из LocalStorage)' : ''}.`);
+      log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из памяти скрипта)' : ''}.`);
     } else {
       const curVal = parseInt(ui.startRow.value, 10) || 1;
       // Если сохраненная строка выше текущей - принудительно обновляем
       if (curVal === 1 || suggestedStart > curVal) {
         ui.startRow.value = suggestedStart;
-        if (savedMatches) log(`Продолжаем с Excel#${suggestedStart} (из LocalStorage).`);
+        if (savedMatches) log(`Продолжаем с Excel#${suggestedStart} (из памяти скрипта).`);
       }
     }
 
@@ -1306,7 +1316,7 @@
     await sleep(300);
     await waitForNetIdle(1000, 5000);
 
-    // Проверяем, не затёрло ли поле при асинхронном рендере (баг v1.59)
+    // Проверяем, не затёрло ли поле при асинхронном рендере
     const solVerify = findSolutionTextarea(getFormDoc(state.currentDesc));
     if (!solVerify.r) {
         throw new Error('E.2: поле решения пропало после записи');
@@ -1474,7 +1484,7 @@
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
     
-    // Сохраняем стартовую строку в LocalStorage при нажатии Старт
+    // Сохраняем стартовую строку при нажатии Старт
     saveState(state.fileName, effectiveStart);
 
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
@@ -1526,7 +1536,7 @@
         await transferOne(item);
         state.stats.ok++;
         saveState(state.fileName, item.excelRowNum);
-        ok(`✅ Excel#${item.excelRowNum} — сохранено в LocalStorage`);
+        ok(`✅ Excel#${item.excelRowNum} — сохранено`);
         state.idx++;
         updateStat();
         ui.prog.value = state.idx;
