@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.63
+// @version      1.64
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -389,7 +389,6 @@
     return null;
   }
 
-  // Улучшенный поиск формы (учитывает View Mode, где текст лежит в textContent)
   function getFormDoc(expectedDesc) {
     let bestDoc = null;
     let maxScore = -1;
@@ -398,7 +397,7 @@
       if (win && win.frameElement) {
         try {
           const rect = win.frameElement.getBoundingClientRect();
-          if (rect.width === 0 || rect.height === 0) return; // игнорируем скрытые iframe
+          if (rect.width === 0 || rect.height === 0) return;
         } catch (e) { return; }
       }
 
@@ -482,6 +481,44 @@
     constructor() { super('Остановлено пользователем'); this.name = 'SMStoppedError'; }
   }
   function checkStop() { if (state.stopped) throw new SMStoppedError(); }
+
+  // ==================== НОВЫЕ ХЕЛПЕРЫ ДЛЯ ВЕРИФИКАЦИИ SAVE ====================
+
+  // Максимальный timestamp POST среди всех фреймов.
+  function getLastPostTs() {
+    let maxTs = 0;
+    walkFrames((doc, win) => {
+      try {
+        if (win && typeof win.__SM_LAST_POST_TS__ === 'number' && win.__SM_LAST_POST_TS__ > maxTs) {
+          maxTs = win.__SM_LAST_POST_TS__;
+        }
+      } catch(e) {}
+    });
+    return maxTs;
+  }
+
+  // Текущее значение статуса инцидента (dropdown btadminh_lcstatus).
+  function getCurrentStatusLabel() {
+    const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
+    if (!r || !r.el) return null;
+    return (r.el.value || '').trim() || null;
+  }
+
+  // Минимальный сетевой idle среди всех фреймов.
+  function getMinNetIdle() {
+    let minIdle = 999999;
+    walkFrames((doc, win) => {
+      try {
+        if (win && typeof win.__SM_NET_IDLE_MS__ === 'function') {
+          const idle = win.__SM_NET_IDLE_MS__();
+          if (typeof idle === 'number' && idle < minIdle) minIdle = idle;
+        }
+      } catch(e) {}
+    });
+    return minIdle;
+  }
+
+  // ========================================================================
 
   async function waitForNetIdle(idleMs = 2000, timeoutMs = 30000) {
     const t0 = Date.now();
@@ -638,12 +675,11 @@
     return norm(el.value) === norm(value);
   }
 
-  // Поиск поля решения. Принимает любой видимый textarea с суффиксом text_longtext.
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
     walkFrames((doc, win, depth) => {
-      if (bestMatch && bestMatch.doc === preferredDoc) return; // Если уже нашли в целевом фрейме
+      if (bestMatch && bestMatch.doc === preferredDoc) return;
 
       let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
       for (const ta of tas) {
@@ -919,15 +955,15 @@
     fileBuffer: null, fileName: null, parsedFrom: null,
     lastFilledExcelRow: null, totalFilled: 0,
     allRows: null,
-    currentDesc: ''
+    currentDesc: '',
+    currentSolutionText: '',
+    currentLongTextBefore: ''
   };
 
-  // Загрузка с миграцией из localStorage
   function loadSavedState() {
     try {
       let raw = typeof GM_getValue === 'function' ? GM_getValue(CFG.lsKey, null) : null;
       
-      // Если в GM пусто, пробуем localStorage (миграция)
       if (!raw) {
         const lsRaw = localStorage.getItem(CFG.lsKey);
         if (lsRaw) {
@@ -1033,7 +1069,6 @@
     const savedMatches = saved && saved.fileName === newName;
     const lastSavedExcel = savedMatches ? (Number(saved.lastExcelRow) || 0) : 0;
 
-    // Диагностический лог
     log(`[Diag] Сохранение: ${saved ? `"${saved.fileName}", строка ${saved.lastExcelRow}` : 'не найдено'}`);
     log(`[Diag] Совпадение файла: ${savedMatches}, lastSavedExcel = ${lastSavedExcel}`);
 
@@ -1055,7 +1090,6 @@
       log(`Файл сменился → «Начать со строки» = ${suggestedStart}${savedMatches ? ' (из памяти скрипта)' : ''}.`);
     } else {
       const curVal = parseInt(ui.startRow.value, 10) || 1;
-      // Если сохраненная строка выше текущей - принудительно обновляем
       if (curVal === 1 || suggestedStart > curVal) {
         ui.startRow.value = suggestedStart;
         if (savedMatches) log(`Продолжаем с Excel#${suggestedStart} (из памяти скрипта).`);
@@ -1156,11 +1190,126 @@
     await debugPause('Форма инцидента открыта');
   }
 
-  // ==================== ОСНОВНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ ====================
+  // ========================================================================
+  // ★★★ ГЛАВНОЕ НОВОВВЕДЕНИЕ: надёжное сохранение с проверкой POST ★★★
+  // ========================================================================
+  async function saveSolutionWithVerification(maxAttempts = 3) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      checkStop();
+
+      // 1) Убедиться, что мы в edit mode
+      let formDoc = getFormDoc(state.currentDesc);
+      let saveBtn = formDoc ? findInDoc(formDoc, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
+      let inEdit = saveBtn && isVisible(saveBtn) && !saveBtn.disabled;
+
+      if (!inEdit) {
+        dbg(`    [E.3] попытка ${attempt}: не в edit mode — пробую войти через EDIT`);
+        const editRec = findInFrames('C32_W39_V41_EDIT');
+        if (editRec && isVisible(editRec.el)) {
+          nativeSubmitButton(editRec.el, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
+          await waitForNetIdle(2000, 15000);
+        }
+        formDoc = getFormDoc(state.currentDesc);
+        saveBtn = formDoc ? findInDoc(formDoc, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
+        inEdit = saveBtn && isVisible(saveBtn) && !saveBtn.disabled;
+      }
+
+      if (!inEdit) {
+        warn(`  ⚠ [E.3] попытка ${attempt}: не удалось войти в edit mode`);
+        await sleep(2000);
+        continue;
+      }
+
+      // 2) Перепроверить статус: если слетел E0005 — вернуть
+      const curStatus = getCurrentStatusLabel();
+      const isStatusOk = curStatus && (/Предложение по решению/.test(curStatus) || /^5\./.test(curStatus));
+      if (!isStatusOk) {
+        dbg(`    [E.3] попытка ${attempt}: статус "${curStatus || '?'}" — повторно ставлю E0005`);
+        const stLabel = getLabelByKey('C32_W39_V41_V52_btadminh_lcstatus__items', CFG.status.solution);
+        if (stLabel) {
+          await setDropdownByLabel('C32_W39_V41_V52_btadminh_lcstatus', stLabel);
+          await waitForNetIdle(1000, 10000);
+          formDoc = getFormDoc(state.currentDesc);
+          saveBtn = formDoc ? findInDoc(formDoc, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
+        }
+      }
+
+      // 3) Перепроверить/восстановить текст решения (если форма перерисовалась)
+      const sol = findSolutionTextarea(getFormDoc(state.currentDesc));
+      if (sol.r && isVisible(sol.r.el) && state.currentSolutionText) {
+        if ((sol.r.el.value || '') !== state.currentSolutionText) {
+          dbg(`    [E.3] попытка ${attempt}: перезаписываю текст решения`);
+          sol.r.el.focus();
+          sol.r.el.value = '';
+          sol.r.el.dispatchEvent(new Event('input', { bubbles: true }));
+          sol.r.el.value = state.currentSolutionText;
+          sol.r.el.dispatchEvent(new Event('input', { bubbles: true }));
+          sol.r.el.dispatchEvent(new Event('change', { bubbles: true }));
+          sol.r.el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a', keyCode: 65 }));
+          sol.r.el.blur();
+          await sleep(300);
+        }
+      }
+
+      // 4) Клик SAVE + детект POST
+      const lastPostBefore = getLastPostTs();
+      dbg(`    [E.3] клик SAVE (попытка ${attempt}/${maxAttempts}), lastPostBefore=${lastPostBefore}`);
+      if (!saveBtn) throw new Error('E.3: нет кнопки «Сохранить»');
+      nativeSubmitButton(saveBtn, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0);
+
+      const postFired = await waitForCondition(
+        () => getLastPostTs() > lastPostBefore,
+        10000, 100, `POST после SAVE (попытка ${attempt})`);
+
+      if (!postFired) {
+        warnItem(`  ⚠ [E.3] попытка ${attempt}: POST не обнаружен (SAVE «проглочен»)`);
+        await sleep(1500);
+        continue;
+      }
+
+      dbg(`    [E.3] попытка ${attempt}: POST обнаружен ✔`);
+
+      // 5) Ждём сетевой тишины и возврата в view mode
+      await waitForNetIdle(2000, 30000);
+
+      const backView = await waitForCondition(() => {
+        const doc = getFormDoc(state.currentDesc);
+        if (!doc) return false;
+        const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+        return btn && isVisible(btn);
+      }, 30000, 200, `view mode (попытка ${attempt})`);
+
+      if (!backView) {
+        warnItem(`  ⚠ [E.3] попытка ${attempt}: POST ушёл, но view mode не наступил`);
+        await sleep(1500);
+        continue;
+      }
+
+      // 6) Финальный лог статуса
+      const finalStatus = getCurrentStatusLabel();
+      if (finalStatus) {
+        if (/Предложение по решению/.test(finalStatus) || /^5\./.test(finalStatus)) {
+          ok(`  ✔ Решение записано (POST ok, статус="${finalStatus}")`);
+        } else {
+          warn(`  ⚠ [E.3] сохранено, но статус="${finalStatus}" (ожидался E0005)`);
+        }
+      } else {
+        ok('  ✔ Решение записано (POST ok)');
+      }
+      return true;
+    }
+
+    return false;
+  }
+  // ========================================================================
+
   async function transferOne(item) {
     const d = parseRow(item.cells);
     if (!d.desc) d.desc = `Инцидент Excel#${item.excelRowNum}`;
     state.currentDesc = d.desc;
+    state.currentSolutionText = d.longTextSolution;
+    state.currentLongTextBefore = d.longTextBefore;
+
     if (!d.num) throw new Error(`Excel#${item.excelRowNum}: не удалось извлечь номер категории из "${d.iVal}" (колонка I)`);
     log(`▶ Excel#${item.excelRowNum}: ${d.desc} | номер="${d.num}"`);
 
@@ -1247,6 +1396,7 @@
       }, 30000, 200, 'перезагрузка после SAVE (C.1)');
     if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
     ok('  ✔ Инцидент создан.');
+    log(`  статус после создания: "${getCurrentStatusLabel() || '?'}"`);
     await debugPause('После создания инцидента');
     checkStop();
 
@@ -1282,6 +1432,15 @@
     
     for (let attempt = 1; attempt <= maxE1Attempts; attempt++) {
       checkStop();
+
+      // ★ НОВОЕ: если textarea решения уже видна — не кликаем повторно (избегаем toggle-гонки)
+      const existing = findSolutionTextarea(getFormDoc(state.currentDesc));
+      if (existing.r && isVisible(existing.r.el)) {
+        ok(`  ✔ [E.1] textarea решения уже доступна (попытка ${attempt})`);
+        fieldReady = true;
+        break;
+      }
+
       const formDocE1 = getFormDoc(state.currentDesc);
       let menuBtn = formDocE1 ? findTextAddButton(formDocE1) : null;
       if (!menuBtn) menuBtn = findTextAddButton(null);
@@ -1301,20 +1460,22 @@
         continue;
       }
 
+      dbg(`    [E.1] клик по пункту «Решение» (попытка ${attempt}/${maxE1Attempts})`);
       realClick(solItem);
       await sleep(500);
-      await waitForNetIdle(1000, 5000); // Ждём, пока форма перерисуется
+      await waitForNetIdle(1000, 5000);
 
+      // ★ Таймаут снижен с 15000 до 8000 — быстрее уходим в retry
       fieldReady = await waitForCondition(() => {
         const s = findSolutionTextarea(getFormDoc(state.currentDesc));
         return s.r && isVisible(s.r.el);
-      }, 15000, 200, `появление textarea (попытка ${attempt})`);
+      }, 8000, 200, `появление textarea (попытка ${attempt})`);
 
       if (fieldReady) {
         ok('  ✔ «Решение» выбрано.');
         break;
       } else {
-        log(`  ⚠ [E.1] textarea не появилось (попытка ${attempt}/${maxE1Attempts}).`, 'color:#ff0');
+        warnItem(`  ⚠ [E.1] textarea не появилось (попытка ${attempt}/${maxE1Attempts}).`);
       }
     }
 
@@ -1328,7 +1489,6 @@
     // ============ E.2: Текст решения ============
     log('E.2: Текст решения...');
     
-    // Функция для записи текста с генерацией всех событий SAP
     const writeSolution = (textarea) => {
         textarea.focus();
         textarea.value = '';
@@ -1354,7 +1514,6 @@
     await sleep(300);
     await waitForNetIdle(1000, 5000);
 
-    // Проверяем, не затёрло ли поле при асинхронном рендере
     const solVerify = findSolutionTextarea(getFormDoc(state.currentDesc));
     if (!solVerify.r) {
         throw new Error('E.2: поле решения пропало после записи');
@@ -1445,25 +1604,16 @@
     await debugPause('После E0005');
     checkStop();
 
-    // ============ E.3: SAVE ============
+    // ============ E.3: SAVE + verification + retry ============
     log('E.3: Сохранить (решение)...');
-    const formDocE3 = getFormDoc(state.currentDesc);
-    const saveBtn2 = formDocE3 ? findInDoc(formDocE3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
-    if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
-    if (!nativeSubmitButton(saveBtn2, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0))
-      throw new Error('Не могу нажать «Сохранить» (E.3)');
-    
-    await waitForNetIdle(2000, 30000);
+    log(`  статус перед SAVE: "${getCurrentStatusLabel() || '?'}"`);
 
-    const backView = await waitForCondition(
-      () => {
-        const doc = getFormDoc(state.currentDesc);
-        if (!doc) return false;
-        const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-        return btn && isVisible(btn);
-      }, 30000, 200, 'перезагрузка после SAVE (E.3)');
-    if (!backView) throw new Error('E.3: после SAVE не появилась кнопка «Обработать» — SAVE не применился');
-    ok('  ✔ Решение записано.');
+    const saveOk = await saveSolutionWithVerification(3);
+    if (!saveOk) {
+      dumpDiagnostics('E.3-save-failed');
+      throw new Error('E.3: SAVE не подтвердился после 3 попыток (POST не уходил / view mode не наступал)');
+    }
+
     await debugPause('После сохранения решения');
     checkStop();
 
@@ -1521,8 +1671,6 @@
     await sleep(50);
 
     const effectiveStart = Math.max(1, parseInt(ui.startRow.value, 10) || 1);
-    
-    // Сохраняем стартовую строку при нажатии Старт
     saveState(state.fileName, effectiveStart);
 
     if (state.parsedFrom !== effectiveStart || state.rows.length === 0) {
@@ -1579,7 +1727,6 @@
         updateStat();
         ui.prog.value = state.idx;
         
-        // Обновляем поле ввода на следующую строку
         if (state.idx < state.rows.length) {
           ui.startRow.value = state.rows[state.idx].excelRowNum;
         } else {
@@ -1596,7 +1743,6 @@
         state.stopped = true; break;
       }
       
-      // Мягкий стоп (после текущей строки)
       if (state.stopRequested) {
         log(`⏹ Запрошен мягкий стоп. Завершаем после Excel#${item.excelRowNum}.`);
         state.stopped = true;
