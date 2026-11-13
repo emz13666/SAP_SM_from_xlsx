@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.69
+// @version      1.70
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -625,7 +625,7 @@
     return true;
   }
 
-  // ★ v1.69: явно вызываем onchange и onkeyup, чтобы сработал SAP-овский thtmlbAutoSave
+  // Вызов onchange/onkeyup для thtmlbAutoSave
   function writeSolution(textarea, text) {
     textarea.focus();
     const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -644,7 +644,7 @@
     textarea.blur();
   }
 
-  // ★ v1.69: исключаем поле "До" (C38_W62_V63_V65_text_longtext)
+  // Исключаем поле "До" (C38_W62_V63_V65_text_longtext)
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
@@ -673,7 +673,7 @@
   }
 
   function dumpDiagnostics(label) {
-    const textareas = [], susEls = [], actionBtns = [];
+    const textareas = [], susEls = [], actionBtns = [], statusInfo = null;
     walkFrames((doc, win, depth) => {
       try {
         const tas = doc.querySelectorAll('textarea');
@@ -694,11 +694,18 @@
             actionBtns.push({ id: el.id || '(no-id)', text: txt.slice(0, 50), depth });
           }
         }
+        if (!statusInfo) {
+          const st = doc.getElementById('C32_W39_V41_V52_btadminh_lcstatus');
+          if (st && isVisible(st)) {
+            statusInfo = { id: st.id, tag: st.tagName, val: (st.value || '').trim(), disabled: st.disabled };
+          }
+        }
       } catch(e) {}
     });
     warn(`  [diag ${label}] textareas(visible) = ${JSON.stringify(textareas)}`);
     warn(`  [diag ${label}] _SUS*/_TextAdd/_longtext = ${JSON.stringify(susEls)}`);
     warn(`  [diag ${label}] action buttons = ${JSON.stringify(actionBtns)}`);
+    warn(`  [diag ${label}] status dropdown = ${JSON.stringify(statusInfo)}`);
   }
 
   function isIncidentFormVisible() {
@@ -706,10 +713,10 @@
     return !!(r && isVisible(r.el));
   }
 
-  // ★ v1.69: проверка, что мы уже в режиме редактирования
+  // ★ v1.70: единственный надёжный признак edit mode — наличие dropdown btadminh_lcstatus
   function isInEditMode() {
-    const saveRec = findInFrames('C32_W39_V41_SAVE');
-    return !!(saveRec && isVisible(saveRec.el) && !saveRec.el.disabled);
+    const status = getCurrentStatusLabel();
+    return status !== null && status !== '';
   }
 
   function parseDropdownItems(itemsId) {
@@ -939,6 +946,7 @@
   function getCurrentStatusLabel() {
     const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
     if (!r || !r.el) return null;
+    if (!isVisible(r.el)) return null;
     return (r.el.value || '').trim() || null;
   }
 
@@ -1261,19 +1269,16 @@
 
     await waitForNetIdle(2000, 30000);
 
-    const editAppeared = await waitForCondition(
-      () => {
-        const doc = getFormDoc(state.currentDesc);
-        if (doc) {
-            const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-            if (btn && isVisible(btn)) return true;
-        }
-        const r = findInFrames('C32_W39_V41_EDIT');
-        return !!(r && r.el && isVisible(r.el));
-      }, 30000, 200, 'перезагрузка после SAVE (C.1)');
-    if (!editAppeared) throw new Error('После SAVE не появилась кнопка «Обработать» (C.1)');
-    ok('  ✔ Инцидент создан.');
-    log(`  статус после создания: "${getCurrentStatusLabel() || '?'}"`);
+    // ★ v1.70: ждём именно view mode — status dropdown (btadminh_lcstatus) должен ИСЧЕЗНУТЬ
+    const viewModeReady = await waitForCondition(() => {
+      return getCurrentStatusLabel() === null;
+    }, 30000, 200, 'view mode (status dropdown исчез)');
+    if (!viewModeReady) {
+      warn('  ⚠ C.1: view mode не наступил за 30 с — форма всё ещё в edit mode');
+      log(`  текущий статус: "${getCurrentStatusLabel() || '?'}"`);
+    } else {
+      ok('  ✔ Инцидент создан (view mode).');
+    }
     await debugPause('После создания инцидента');
     checkStop();
 
@@ -1288,22 +1293,16 @@
           if (nativeSubmitButton(saveBtn3, 'htmlb:button:click:0', 'C32_W39_V41_SAVE', 'SAVE', 0)) {
             await waitForNetIdle(2000, 20000);
             const back = await waitForCondition(
-              () => {
-                const doc = getFormDoc(state.currentDesc);
-                if (!doc) return false;
-                const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-                return btn && isVisible(btn);
-              },
+              () => getCurrentStatusLabel() === null,
               20000, 200, 'перезагрузка после SAVE (C.3)');
             if (back) ok('  ✔ "До" сохранено (fallback).');
-            else warn('  ⚠ C.3: после SAVE нет кнопки «Обработать»');
+            else warn('  ⚠ C.3: после SAVE view mode не наступил');
           }
         }
       } else warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
     }
 
     // ============ Вспомогательные функции для E.1–C.2b ============
-    // Один проход E.1 + E.2 + C.2.
     async function attemptSolutionPass(passNo) {
       checkStop();
 
@@ -1336,12 +1335,11 @@
         await sleep(500);
         await waitForNetIdle(1000, 5000);
 
-        // Признак успеха: textarea присутствует. В форме B она была всегда, и это ОК.
-        // Но мы исключаем C38_W62_V63_V65, чтобы не схватить "До".
+        // ★ v1.70: таймаут увеличен до 12 с (первый клик в view mode бывает с задержкой)
         const exists = await waitForCondition(() => {
           const s = findSolutionTextarea(getFormDoc(state.currentDesc));
           return s.r && isVisible(s.r.el);
-        }, 8000, 200, `textarea (попытка ${e1attempt})`);
+        }, 12000, 200, `textarea (попытка ${e1attempt})`);
 
         if (exists) { ok('  ✔ «Решение» выбрано.'); menuClicked = true; break; }
         warnItem(`  ⚠ [E.1] textarea не появилось (попытка ${e1attempt}/3)`);
@@ -1369,7 +1367,6 @@
       await sleep(300);
       await waitForNetIdle(1000, 5000);
 
-      // Проверка после записи (1 retry)
       let verified = false;
       for (let v = 1; v <= 2; v++) {
         const sV = findSolutionTextarea(getFormDoc(state.currentDesc));
@@ -1389,55 +1386,62 @@
         throw new Error(`E.2[pass ${passNo}]: форма не видна после записи текста — SAP «улетел» на Home.`);
       }
 
-      // -------- C.2: «Обработать» --------
+      // -------- C.2: «Обработать» — обязательно убеждаемся в edit mode --------
       log(`C.2[pass ${passNo}]: «Обработать»...`);
-      let editClicked = false;
 
-      // ★ v1.69: проверка, что мы уже в edit mode
-      if (isInEditMode()) {
-        log('  ✔ Уже в режиме редактирования, «Обработать» не требуется.');
-        editClicked = true;
+      // ★ v1.70: сначала пробуем кликнуть EDIT, если он кликабелен
+      let editClicked = false;
+      const editRec = findInFrames('C32_W39_V41_EDIT');
+      if (editRec && editRec.el && isVisible(editRec.el)) {
+        const oc = editRec.el.getAttribute('onclick') || '';
+        const isClickable = !editRec.el.disabled && (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit'));
+        if (isClickable) {
+          dbg('    [C.2] клик «Обработать» (view → edit)');
+          nativeSubmitButton(editRec.el, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
+          editClicked = true;
+          await waitForNetIdle(2000, 30000);
+        } else {
+          dbg('    [C.2] «Обработать» не кликабельна — вероятно уже в edit mode');
+        }
       } else {
-        await waitForCondition(() => {
-          let btn = null;
-          const doc = getFormDoc(state.currentDesc);
-          if (doc) btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-          if (!btn || !isVisible(btn)) {
-            const r = findInFrames('C32_W39_V41_EDIT');
-            btn = r ? r.el : null;
-          }
-          if (!btn || !isVisible(btn)) return false;
-          const oc = btn.getAttribute('onclick') || '';
-          if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) {
-            nativeSubmitButton(btn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
-            editClicked = true;
-            return true;
-          }
-          return false;
-        }, 30000, 200, 'EDIT button interactive and clicked');
+        dbg('    [C.2] «Обработать» не найдена в DOM');
       }
 
-      if (!editClicked) throw new Error(`C.2[pass ${passNo}]: не удалось кликнуть «Обработать»`);
-      await waitForNetIdle(2000, 30000);
+      // ★ v1.70: верификация edit mode через status dropdown
+      const editReady = await waitForCondition(() => {
+        return getCurrentStatusLabel() !== null;
+      }, 30000, 200, `status dropdown (edit mode) pass ${passNo}`);
 
-      // -------- C.2b: проверка, что текст решения «прижился» --------
+      if (!editReady) {
+        dumpDiagnostics(`C.2-pass${passNo}-no-edit`);
+        throw new Error(`C.2[pass ${passNo}]: не удалось войти в edit mode (status dropdown отсутствует)`);
+      }
+      ok('  ✔ Режим редактирования (btadminh_lcstatus найден).');
+
+      // -------- C.2b: текст сохранился И edit mode активен --------
       await sleep(300);
       await waitForNetIdle(1000, 5000);
       const sAfter = findSolutionTextarea(getFormDoc(state.currentDesc));
+      const statusAfter = getCurrentStatusLabel();
+
       if (!sAfter.r) {
-        warnItem(`  ⚠ [C.2b pass ${passNo}] поле не найдено после «Обработать»`);
+        warnItem(`  ⚠ [C.2b pass ${passNo}] textarea не найдено`);
+        return false;
+      }
+      if (statusAfter === null) {
+        warnItem(`  ⚠ [C.2b pass ${passNo}] не в edit mode (status dropdown исчез)`);
         return false;
       }
       const vAfter = sAfter.r.el.value || '';
       if (vAfter === d.longTextSolution) {
-        log(`  ✔ [C.2b pass ${passNo}] текст сохранён после «Обработать».`);
+        log(`  ✔ [C.2b pass ${passNo}] текст сохранён, edit mode активен (status="${statusAfter}").`);
         return true;
       }
       warnItem(`  ⚠ [C.2b pass ${passNo}] текст после «Обработать» = "${vAfter.slice(0,60).replace(/\n/g,'⏎')}" (длина ${vAfter.length}, ожидалось ${d.longTextSolution.length})`);
       return false;
     }
 
-    // ============ E.1 + E.2 + C.2 + C.2b (pass 1, при неудаче — pass 2) ============
+    // ============ E.1 + E.2 + C.2 + C.2b (до 2 проходов) ============
     let solutionConfirmed = false;
     const maxPasses = 2;
     for (let pass = 1; pass <= maxPasses; pass++) {
@@ -1498,24 +1502,13 @@
       checkStop();
 
       // Если случайно ушли в view mode — вернёмся в edit
-      let formDocE3 = getFormDoc(state.currentDesc);
-      let saveBtn2 = formDocE3 ? findInDoc(formDocE3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
-      let inEdit = saveBtn2 && isVisible(saveBtn2) && !saveBtn2.disabled;
-      if (!inEdit) {
+      if (getCurrentStatusLabel() === null) {
         dbg(`    [E.3] попытка ${e3Attempt}: не в edit mode — жму EDIT`);
         const editRec = findInFrames('C32_W39_V41_EDIT');
-        if (editRec && isVisible(editRec.el)) {
+        if (editRec && editRec.el && isVisible(editRec.el)) {
           nativeSubmitButton(editRec.el, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
           await waitForNetIdle(2000, 15000);
         }
-        formDocE3 = getFormDoc(state.currentDesc);
-        saveBtn2 = formDocE3 ? findInDoc(formDocE3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
-        inEdit = saveBtn2 && isVisible(saveBtn2) && !saveBtn2.disabled;
-      }
-      if (!inEdit) {
-        warnItem(`  ⚠ [E.3] попытка ${e3Attempt}: не в edit mode`);
-        await sleep(1500);
-        continue;
       }
 
       // Проверить/восстановить статус E0005 (мог слететь)
@@ -1527,11 +1520,11 @@
         if (stLabel3) {
           await setDropdownByLabel(stId, stLabel3);
           await waitForNetIdle(1000, 10000);
-          formDocE3 = getFormDoc(state.currentDesc);
-          saveBtn2 = formDocE3 ? findInDoc(formDocE3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
         }
       }
 
+      const formDocE3 = getFormDoc(state.currentDesc);
+      const saveBtn2 = formDocE3 ? findInDoc(formDocE3, 'C32_W39_V41_SAVE') : findEl('C32_W39_V41_SAVE');
       if (!saveBtn2) throw new Error('Нет кнопки «Сохранить» (E.3)');
 
       const lastPostBefore = getLastPostTs();
@@ -1553,12 +1546,8 @@
       await waitForNetIdle(2000, 30000);
 
       const backView = await waitForCondition(
-        () => {
-          const doc = getFormDoc(state.currentDesc);
-          if (!doc) return false;
-          const btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-          return btn && isVisible(btn);
-        }, 30000, 200, `view mode (E.3, попытка ${e3Attempt})`);
+        () => getCurrentStatusLabel() === null,
+        30000, 200, `view mode (E.3, попытка ${e3Attempt})`);
 
       if (!backView) {
         warnItem(`  ⚠ [E.3] попытка ${e3Attempt}: POST ушёл, но view mode не наступил`);
@@ -1567,8 +1556,7 @@
       }
 
       e3Success = true;
-      const finalStatus = getCurrentStatusLabel();
-      log(`  статус после SAVE: "${finalStatus || '?'}"`);
+      log(`  ✔ Решение записано (view mode наступил).`);
       break;
     }
 
@@ -1576,7 +1564,6 @@
       dumpDiagnostics('E.3-save-failed');
       throw new Error('E.3: SAVE не подтвердился после 3 попыток');
     }
-    ok('  ✔ Решение записано.');
     await debugPause('После сохранения решения');
     checkStop();
 
