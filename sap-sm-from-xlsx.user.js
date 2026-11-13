@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.64
+// @version      1.65
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -482,9 +482,8 @@
   }
   function checkStop() { if (state.stopped) throw new SMStoppedError(); }
 
-  // ==================== НОВЫЕ ХЕЛПЕРЫ ДЛЯ ВЕРИФИКАЦИИ SAVE ====================
+  // ==================== ХЕЛПЕРЫ ВЕРИФИКАЦИИ ====================
 
-  // Максимальный timestamp POST среди всех фреймов.
   function getLastPostTs() {
     let maxTs = 0;
     walkFrames((doc, win) => {
@@ -497,14 +496,12 @@
     return maxTs;
   }
 
-  // Текущее значение статуса инцидента (dropdown btadminh_lcstatus).
   function getCurrentStatusLabel() {
     const r = findInFrames('C32_W39_V41_V52_btadminh_lcstatus');
     if (!r || !r.el) return null;
     return (r.el.value || '').trim() || null;
   }
 
-  // Минимальный сетевой idle среди всех фреймов.
   function getMinNetIdle() {
     let minIdle = 999999;
     walkFrames((doc, win) => {
@@ -675,6 +672,7 @@
     return norm(el.value) === norm(value);
   }
 
+  // ★ Поиск любого видимого textarea с суффиксом text_longtext.
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
@@ -702,6 +700,29 @@
     return { r: null, id: null };
   }
 
+  // ★★ Поиск ПУСТОГО видимого textarea — для E.1 (режим «Решение»).
+  function findEmptySolutionTextarea(preferredDoc) {
+    let bestMatch = null;
+
+    walkFrames((doc, win, depth) => {
+      if (bestMatch && bestMatch.doc === preferredDoc) return;
+
+      let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
+      for (const ta of tas) {
+        if (!isVisible(ta)) continue;
+        const id = ta.id || '';
+        if (!id.includes('text_longtext')) continue;
+        if ((ta.value || '') !== '') continue;  // должен быть пустым
+        const rec = { doc, win, el: ta, depth };
+        if (doc === preferredDoc) { bestMatch = rec; return; }
+        if (!bestMatch) bestMatch = rec;
+      }
+    });
+
+    if (bestMatch) return { r: bestMatch, id: bestMatch.el.id };
+    return { r: null, id: null };
+  }
+
   function dumpDiagnostics(label) {
     const textareas = [], susEls = [], actionBtns = [];
     walkFrames((doc, win, depth) => {
@@ -709,7 +730,7 @@
         const tas = doc.querySelectorAll('textarea');
         for (const ta of tas) {
           if (!isVisible(ta)) continue;
-          textareas.push({ id: ta.id || '(no-id)', v: (ta.value || '').slice(0, 40), depth });
+          textareas.push({ id: ta.id || '(no-id)', len: (ta.value || '').length, v: (ta.value || '').slice(0, 40), depth });
         }
         const ses = doc.querySelectorAll('[id*="_SUSO"], [id*="_SUSI"], [id*="_SUSN"], [id*="_TextAdd"], [id*="_text_longtext"]');
         for (const el of ses) {
@@ -1191,7 +1212,7 @@
   }
 
   // ========================================================================
-  // ★★★ ГЛАВНОЕ НОВОВВЕДЕНИЕ: надёжное сохранение с проверкой POST ★★★
+  // ★ saveSolutionWithVerification: надёжное сохранение с проверкой POST
   // ========================================================================
   async function saveSolutionWithVerification(maxAttempts = 3) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1425,26 +1446,24 @@
       } else warnItem('  ✖ длинный текст "до" не удалось записать даже после Обработать');
     }
 
-    // ============ E.1: Добавить текст → Решение (с 3 попытками) ============
+    // ============ E.1: Добавить текст → Решение ============
+    // ★★★ ВСЕГДА кликаем. Ждём ПУСТОЕ textarea. ★★★
     log('E.1: «Добавить текст» → «Решение»...');
     let fieldReady = false;
     const maxE1Attempts = 3;
-    
+
     for (let attempt = 1; attempt <= maxE1Attempts; attempt++) {
       checkStop();
 
-      // ★ НОВОЕ: если textarea решения уже видна — не кликаем повторно (избегаем toggle-гонки)
-      const existing = findSolutionTextarea(getFormDoc(state.currentDesc));
-      if (existing.r && isVisible(existing.r.el)) {
-        ok(`  ✔ [E.1] textarea решения уже доступна (попытка ${attempt})`);
-        fieldReady = true;
-        break;
-      }
+      // Snapshot до клика
+      const before = findSolutionTextarea(getFormDoc(state.currentDesc));
+      const beforeVal = before.r ? (before.r.el.value || '') : null;
+      dbg(`    [E.1] попытка ${attempt}: до клика textarea=${before.r ? `id="${before.id}", длина=${beforeVal.length}` : 'нет'}`);
 
       const formDocE1 = getFormDoc(state.currentDesc);
       let menuBtn = formDocE1 ? findTextAddButton(formDocE1) : null;
       if (!menuBtn) menuBtn = findTextAddButton(null);
-      
+
       if (!menuBtn) {
         log(`  [E.1] Кнопка «Добавить текст» не найдена (попытка ${attempt}/${maxE1Attempts}). Ждём...`);
         await sleep(2000);
@@ -1454,7 +1473,7 @@
 
       const solItem = await waitForSolutionMenuItem(menuBtn, 10000, formDocE1);
       checkStop();
-      
+
       if (!solItem) {
         log(`  ⚠ [E.1] пункт «Решение» не появился (попытка ${attempt}/${maxE1Attempts}).`, 'color:#ff0');
         continue;
@@ -1465,30 +1484,35 @@
       await sleep(500);
       await waitForNetIdle(1000, 5000);
 
-      // ★ Таймаут снижен с 15000 до 8000 — быстрее уходим в retry
-      fieldReady = await waitForCondition(() => {
-        const s = findSolutionTextarea(getFormDoc(state.currentDesc));
-        return s.r && isVisible(s.r.el);
-      }, 8000, 200, `появление textarea (попытка ${attempt})`);
+      // Snapshot после клика
+      const after = findSolutionTextarea(getFormDoc(state.currentDesc));
+      const afterVal = after.r ? (after.r.el.value || '') : null;
+      dbg(`    [E.1] попытка ${attempt}: после клика textarea=${after.r ? `id="${after.id}", длина=${afterVal.length}` : 'нет'}`);
 
-      if (fieldReady) {
-        ok('  ✔ «Решение» выбрано.');
+      // Успех: пустое видимое textarea
+      if (after.r && isVisible(after.r.el) && afterVal === '') {
+        ok('  ✔ «Решение» выбрано (поле пустое).');
+        fieldReady = true;
         break;
+      }
+
+      if (after.r && isVisible(after.r.el)) {
+        warnItem(`  ⚠ [E.1] textarea есть, но НЕ пустое (длина ${afterVal.length}): "${(afterVal || '').slice(0, 50).replace(/\n/g, '⏎')}…" — повторяю (попытка ${attempt}/${maxE1Attempts})`);
       } else {
         warnItem(`  ⚠ [E.1] textarea не появилось (попытка ${attempt}/${maxE1Attempts}).`);
       }
     }
 
     if (!fieldReady) {
-      dumpDiagnostics('E.1-no-textarea');
-      throw new Error('E.1: после «Решение» не появилось textarea (все попытки исчерпаны)');
+      dumpDiagnostics('E.1-no-empty-textarea');
+      throw new Error('E.1: после «Решение» не появилось ПУСТОЕ textarea (все попытки)');
     }
     await debugPause('После «Решение»');
     checkStop();
 
     // ============ E.2: Текст решения ============
     log('E.2: Текст решения...');
-    
+
     const writeSolution = (textarea) => {
         textarea.focus();
         textarea.value = '';
@@ -1501,31 +1525,50 @@
     };
 
     const formDocE2 = getFormDoc(state.currentDesc);
-    let sol = findSolutionTextarea(formDocE2);
+    const sol = findSolutionTextarea(formDocE2);
     if (!sol.r) {
       dumpDiagnostics('E.2-no-solution-field');
       throw new Error('E.2: не найдено поле для текста решения');
     }
-    log(`  найдено поле: id="${sol.id || '(no-id)'}"`);
+
+    // ★ Проверка: поле ДОЛЖНО быть пустым (мы в режиме «Решение»).
+    const preVal = (sol.r.el.value || '');
+    if (preVal !== '') {
+      dumpDiagnostics('E.2-field-not-empty');
+      throw new Error(`E.2: поле НЕ пустое (длина ${preVal.length}) — не в режиме «Решение», отказываюсь писать`);
+    }
+    log(`  найдено ПУСТОЕ поле: id="${sol.id || '(no-id)'}"`);
 
     writeSolution(sol.r.el);
     log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
-    
+
     await sleep(300);
     await waitForNetIdle(1000, 5000);
 
-    const solVerify = findSolutionTextarea(getFormDoc(state.currentDesc));
-    if (!solVerify.r) {
-        throw new Error('E.2: поле решения пропало после записи');
-    }
-    
-    if (solVerify.r.el.value !== d.longTextSolution) {
-        log(`  ⚠ Текст решения исчез после рендера, записываем заново...`);
-        writeSolution(solVerify.r.el);
-        await sleep(300);
+    // ★ Verify с повторами
+    let verifyOk = false;
+    for (let v = 1; v <= 3; v++) {
+      checkStop();
+      const sv = findSolutionTextarea(getFormDoc(state.currentDesc));
+      if (sv.r && (sv.r.el.value || '') === d.longTextSolution) {
+        verifyOk = true;
+        dbg(`    [E.2] verify ${v}/3: ✔ значение совпадает`);
+        break;
+      }
+      if (!sv.r) {
+        dbg(`    [E.2] verify ${v}/3: textarea не найдено`);
+      } else {
+        dbg(`    [E.2] verify ${v}/3: значение "${(sv.r.el.value || '').slice(0, 40).replace(/\n/g, '⏎')}…" ≠ ожидаемому, перезаписываю`);
+        writeSolution(sv.r.el);
         await waitForNetIdle(1000, 5000);
-        log(`  ✔ Текст решения записан заново (${(solVerify.r.el.value || '').length} симв.)`);
+      }
+      await sleep(500);
     }
+    if (!verifyOk) {
+      dumpDiagnostics('E.2-verify-failed');
+      throw new Error('E.2: не удалось подтвердить текст решения после записи');
+    }
+    ok('  ✔ Текст решения подтверждён.');
 
     if (!isIncidentFormVisible()) {
       dumpDiagnostics('E.2-form-lost-after-text');
@@ -1634,11 +1677,16 @@
     const SOL_ID = 'C38_W62_V63_V65_TextAdd__items____SUSO';
     const t0 = Date.now();
     let lastClick = 0, lastLog = 0;
+
+    // ★ Если пункт уже виден (меню осталось открытым с прошлой попытки) — не кликаем
+    let sol = preferredDoc ? findInDoc(preferredDoc, SOL_ID) : findEl(SOL_ID);
+    if (sol && sol.offsetParent) return sol;
+
     realClick(menuBtn);
     lastClick = Date.now();
     while (Date.now() - t0 < timeoutMs) {
       checkStop();
-      const sol = preferredDoc ? findInDoc(preferredDoc, SOL_ID) : findEl(SOL_ID);
+      sol = preferredDoc ? findInDoc(preferredDoc, SOL_ID) : findEl(SOL_ID);
       if (sol && sol.offsetParent) return sol;
       if (Date.now() - lastClick > 2000) { realClick(menuBtn); lastClick = Date.now(); }
       if (Date.now() - t0 - lastLog > 5000) { lastLog = Date.now() - t0; dbg(`    … ждём пункт «Решение» (${Math.round(lastLog/1000)} с)`); }
