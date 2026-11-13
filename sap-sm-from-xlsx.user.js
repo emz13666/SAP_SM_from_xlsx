@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.68
+// @version      1.69
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -625,17 +625,26 @@
     return true;
   }
 
-  function setElementValue(el, value, fireInput = false, fireChange = false) {
-    if (!el) return false;
-    try { el.focus(); } catch(e) {}
-    el.value = value;
-    if (fireInput)  { try { el.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {} }
-    if (fireChange) { try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {} }
-    const norm = (s) => String(s == null ? '' : s).replace(/\r\n/g, '\n');
-    return norm(el.value) === norm(value);
+  // ★ v1.69: явно вызываем onchange и onkeyup, чтобы сработал SAP-овский thtmlbAutoSave
+  function writeSolution(textarea, text) {
+    textarea.focus();
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    nativeSetter.call(textarea, text);
+
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    textarea.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a', keyCode: 65 }));
+
+    if (typeof textarea.onchange === 'function') {
+      try { textarea.onchange(); } catch(e){}
+    }
+    if (typeof textarea.onkeyup === 'function') {
+      try { textarea.onkeyup(); } catch(e){}
+    }
+    textarea.blur();
   }
 
-  // ★ findSolutionTextarea — как в v1.63: гибкий поиск по всем фреймам, с предпочтением preferredDoc.
+  // ★ v1.69: исключаем поле "До" (C38_W62_V63_V65_text_longtext)
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
@@ -647,7 +656,7 @@
         if (!isVisible(ta)) continue;
         const id = ta.id || '';
 
-        if (id.includes('text_longtext')) {
+        if (id.includes('text_longtext') && !id.includes('C38_W62_V63_V65_text_longtext')) {
           if (doc === preferredDoc) {
              bestMatch = { doc, win, el: ta, depth };
              return;
@@ -695,6 +704,12 @@
   function isIncidentFormVisible() {
     const r = findInFrames('C32_W39_V41_V52_btadminh_struct.description');
     return !!(r && isVisible(r.el));
+  }
+
+  // ★ v1.69: проверка, что мы уже в режиме редактирования
+  function isInEditMode() {
+    const saveRec = findInFrames('C32_W39_V41_SAVE');
+    return !!(saveRec && isVisible(saveRec.el) && !saveRec.el.disabled);
   }
 
   function parseDropdownItems(itemsId) {
@@ -909,7 +924,6 @@
     return found;
   }
 
-  // ★ НОВЫЙ хелпер для E.3
   function getLastPostTs() {
     let maxTs = 0;
     walkFrames((doc, win) => {
@@ -1289,18 +1303,7 @@
     }
 
     // ============ Вспомогательные функции для E.1–C.2b ============
-    const writeSolution = (textarea) => {
-      textarea.focus();
-      textarea.value = '';
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      textarea.value = d.longTextSolution;
-      textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      textarea.dispatchEvent(new Event('change', { bubbles: true }));
-      textarea.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a', keyCode: 65 }));
-      textarea.blur();
-    };
-
-    // Один проход E.1 + E.2 + C.2. Возвращает true, если после C.2 текст в поле совпадает с d.longTextSolution.
+    // Один проход E.1 + E.2 + C.2.
     async function attemptSolutionPass(passNo) {
       checkStop();
 
@@ -1333,7 +1336,8 @@
         await sleep(500);
         await waitForNetIdle(1000, 5000);
 
-        // Признак успеха: textarea присутствует (в форме B она была всегда, и это ОК).
+        // Признак успеха: textarea присутствует. В форме B она была всегда, и это ОК.
+        // Но мы исключаем C38_W62_V63_V65, чтобы не схватить "До".
         const exists = await waitForCondition(() => {
           const s = findSolutionTextarea(getFormDoc(state.currentDesc));
           return s.r && isVisible(s.r.el);
@@ -1359,7 +1363,7 @@
       }
       log(`  найдено поле: id="${sol.id || '(no-id)'}", длина до записи=${(sol.r.el.value || '').length}`);
 
-      writeSolution(sol.r.el);
+      writeSolution(sol.r.el, d.longTextSolution);
       log(`  ✔ Текст решения записан (${(sol.r.el.value || '').length} симв.)`);
 
       await sleep(300);
@@ -1370,7 +1374,7 @@
       for (let v = 1; v <= 2; v++) {
         const sV = findSolutionTextarea(getFormDoc(state.currentDesc));
         if (sV.r && (sV.r.el.value || '') === d.longTextSolution) { verified = true; break; }
-        if (sV.r) { dbg(`    [E.2] verify ${v}: перезаписываю`); writeSolution(sV.r.el); await waitForNetIdle(1000, 5000); }
+        if (sV.r) { dbg(`    [E.2] verify ${v}: перезаписываю`); writeSolution(sV.r.el, d.longTextSolution); await waitForNetIdle(1000, 5000); }
         else { dbg(`    [E.2] verify ${v}: поле пропало`); }
         await sleep(300);
       }
@@ -1388,43 +1392,33 @@
       // -------- C.2: «Обработать» --------
       log(`C.2[pass ${passNo}]: «Обработать»...`);
       let editClicked = false;
-      await waitForCondition(() => {
-        let btn = null;
-        const doc = getFormDoc(state.currentDesc);
-        if (doc) btn = findInDoc(doc, 'C32_W39_V41_EDIT');
-        if (!btn || !isVisible(btn)) {
-          const r = findInFrames('C32_W39_V41_EDIT');
-          btn = r ? r.el : null;
-        }
-        if (!btn || !isVisible(btn)) return false;
-        const oc = btn.getAttribute('onclick') || '';
-        if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) {
-          nativeSubmitButton(btn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
-          editClicked = true;
-          return true;
-        }
-        return false;
-      }, 30000, 200, 'EDIT button interactive and clicked');
+
+      // ★ v1.69: проверка, что мы уже в edit mode
+      if (isInEditMode()) {
+        log('  ✔ Уже в режиме редактирования, «Обработать» не требуется.');
+        editClicked = true;
+      } else {
+        await waitForCondition(() => {
+          let btn = null;
+          const doc = getFormDoc(state.currentDesc);
+          if (doc) btn = findInDoc(doc, 'C32_W39_V41_EDIT');
+          if (!btn || !isVisible(btn)) {
+            const r = findInFrames('C32_W39_V41_EDIT');
+            btn = r ? r.el : null;
+          }
+          if (!btn || !isVisible(btn)) return false;
+          const oc = btn.getAttribute('onclick') || '';
+          if (oc.includes('htmlbSL') || oc.includes('htmlbSubmitLib') || oc.includes('htmlbSubmit')) {
+            nativeSubmitButton(btn, 'htmlb:button:click:0', 'C32_W39_V41_EDIT', 'EDIT', 0);
+            editClicked = true;
+            return true;
+          }
+          return false;
+        }, 30000, 200, 'EDIT button interactive and clicked');
+      }
 
       if (!editClicked) throw new Error(`C.2[pass ${passNo}]: не удалось кликнуть «Обработать»`);
       await waitForNetIdle(2000, 30000);
-
-      const saveReady = await waitForCondition(() => {
-        let ready = false;
-        walkFrames(doc => {
-          if (ready) return;
-          const links = doc.querySelectorAll('a, button');
-          for (const a of links) {
-            const txt = (a.textContent || '').trim();
-            if (isVisible(a) && (txt === 'Сохранить' || (a.id && a.id.endsWith('_SAVE'))) && !a.disabled) {
-              ready = true; return;
-            }
-          }
-        });
-        return ready;
-      }, 30000, 200, 'save button active (edit mode)');
-      if (!saveReady) throw new Error(`C.2[pass ${passNo}]: форма не перешла в edit-mode (Сохранить неактивна)`);
-      ok('  ✔ Режим редактирования.');
 
       // -------- C.2b: проверка, что текст решения «прижился» --------
       await sleep(300);
