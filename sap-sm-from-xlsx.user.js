@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.70
+// @version      1.72
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -644,7 +644,7 @@
     textarea.blur();
   }
 
-  // Исключаем поле "До" (C38_W62_V63_V65_text_longtext)
+  // ★ v1.72: Умный поиск. Игнорируем поле "До" (C38_W62), если в нем УЖЕ ЕСТЬ ТЕКСТ.
   function findSolutionTextarea(preferredDoc) {
     let bestMatch = null;
 
@@ -655,8 +655,15 @@
       for (const ta of tas) {
         if (!isVisible(ta)) continue;
         const id = ta.id || '';
+        const val = ta.value || '';
 
-        if (id.includes('text_longtext') && !id.includes('C38_W62_V63_V65_text_longtext')) {
+        if (id.includes('text_longtext')) {
+          // Если это поле "До" и в нем есть текст, значит SAP его еще не очистил.
+          // Пропускаем, чтобы случайно не перезаписать.
+          if (id.includes('C38_W62_V63_V65') && val.length > 0) {
+            continue;
+          }
+
           if (doc === preferredDoc) {
              bestMatch = { doc, win, el: ta, depth };
              return;
@@ -713,7 +720,7 @@
     return !!(r && isVisible(r.el));
   }
 
-  // ★ v1.70: единственный надёжный признак edit mode — наличие dropdown btadminh_lcstatus
+  // Единственный надёжный признак edit mode — наличие dropdown btadminh_lcstatus
   function isInEditMode() {
     const status = getCurrentStatusLabel();
     return status !== null && status !== '';
@@ -1269,7 +1276,7 @@
 
     await waitForNetIdle(2000, 30000);
 
-    // ★ v1.70: ждём именно view mode — status dropdown (btadminh_lcstatus) должен ИСЧЕЗНУТЬ
+    // ★ v1.72: ждём именно view mode — status dropdown (btadminh_lcstatus) должен ИСЧЕЗНУТЬ
     const viewModeReady = await waitForCondition(() => {
       return getCurrentStatusLabel() === null;
     }, 30000, 200, 'view mode (status dropdown исчез)');
@@ -1335,7 +1342,7 @@
         await sleep(500);
         await waitForNetIdle(1000, 5000);
 
-        // ★ v1.70: таймаут увеличен до 12 с (первый клик в view mode бывает с задержкой)
+        // ★ v1.72: таймаут 12 с, ищем любой textarea (кроме поля "До" с текстом)
         const exists = await waitForCondition(() => {
           const s = findSolutionTextarea(getFormDoc(state.currentDesc));
           return s.r && isVisible(s.r.el);
@@ -1389,7 +1396,7 @@
       // -------- C.2: «Обработать» — обязательно убеждаемся в edit mode --------
       log(`C.2[pass ${passNo}]: «Обработать»...`);
 
-      // ★ v1.70: сначала пробуем кликнуть EDIT, если он кликабелен
+      // сначала пробуем кликнуть EDIT, если он кликабелен
       let editClicked = false;
       const editRec = findInFrames('C32_W39_V41_EDIT');
       if (editRec && editRec.el && isVisible(editRec.el)) {
@@ -1407,7 +1414,7 @@
         dbg('    [C.2] «Обработать» не найдена в DOM');
       }
 
-      // ★ v1.70: верификация edit mode через status dropdown
+      // верификация edit mode через status dropdown
       const editReady = await waitForCondition(() => {
         return getCurrentStatusLabel() !== null;
       }, 30000, 200, `status dropdown (edit mode) pass ${passNo}`);
