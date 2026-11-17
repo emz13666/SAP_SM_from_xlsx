@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SAP SM: XLSX → Incident (Выполненные работы)
 // @namespace    https://sapsm3.sap.metinvest.com/
-// @version      1.72
+// @version      1.73
 // @description  Переносит строки из листа "Выполненные работы" в SAP SM как инциденты AIC_OB_INCIDENT
 // @match        https://sapsm3.sap.metinvest.com/*
 // @match        https://sapsm3ci.sap.metinvest.com/*
@@ -644,12 +644,12 @@
     textarea.blur();
   }
 
-  // ★ v1.72: Умный поиск. Игнорируем поле "До" (C38_W62), если в нем УЖЕ ЕСТЬ ТЕКСТ.
-  function findSolutionTextarea(preferredDoc) {
+  // ★ v1.73: Умный поиск. Передаем expectedText для проверки, чтобы не спутать с "До".
+  function findSolutionTextarea(preferredDoc, expectedText = null) {
     let bestMatch = null;
 
     walkFrames((doc, win, depth) => {
-      if (bestMatch && bestMatch.doc === preferredDoc) return;
+      if (bestMatch && bestMatch.doc === preferredDoc && !expectedText) return;
 
       let tas; try { tas = doc.querySelectorAll('textarea'); } catch(e) { return; }
       for (const ta of tas) {
@@ -658,18 +658,27 @@
         const val = ta.value || '';
 
         if (id.includes('text_longtext')) {
-          // Если это поле "До" и в нем есть текст, значит SAP его еще не очистил.
-          // Пропускаем, чтобы случайно не перезаписать.
-          if (id.includes('C38_W62_V63_V65') && val.length > 0) {
-            continue;
-          }
+          if (expectedText !== null) {
+              // Мы ищем поле с конкретным текстом. Совпадает - берем.
+              if (val === expectedText) {
+                  if (doc === preferredDoc) { bestMatch = { doc, win, el: ta, depth }; return; }
+                  if (!bestMatch) bestMatch = { doc, win, el: ta, depth };
+              }
+          } else {
+              // Мы ищем поле для записи. 
+              // Игнорируем C38_W62, если в нем уже есть какой-то текст (вероятно, "До").
+              // Но если это C38_W82 или C27_W84 — берем в первую очередь.
+              if (id.includes('C38_W62_V63_V65') && val.length > 0) {
+                  continue;
+              }
 
-          if (doc === preferredDoc) {
-             bestMatch = { doc, win, el: ta, depth };
-             return;
-          }
-          if (!bestMatch) {
-             bestMatch = { doc, win, el: ta, depth };
+              if (doc === preferredDoc) {
+                 if (!bestMatch) bestMatch = { doc, win, el: ta, depth };
+                 if (id.includes('C38_W82') || id.includes('C27_W84')) return;
+              } else {
+                 if (!bestMatch) bestMatch = { doc, win, el: ta, depth };
+                 else if ((id.includes('C38_W82') || id.includes('C27_W84')) && !bestMatch.id.includes('C38_W82') && !bestMatch.id.includes('C27_W84')) bestMatch = { doc, win, el: ta, depth };
+              }
           }
         }
       }
@@ -1276,7 +1285,7 @@
 
     await waitForNetIdle(2000, 30000);
 
-    // ★ v1.72: ждём именно view mode — status dropdown (btadminh_lcstatus) должен ИСЧЕЗНУТЬ
+    // ★ v1.73: ждём именно view mode — status dropdown (btadminh_lcstatus) должен ИСЧЕЗНУТЬ
     const viewModeReady = await waitForCondition(() => {
       return getCurrentStatusLabel() === null;
     }, 30000, 200, 'view mode (status dropdown исчез)');
@@ -1342,7 +1351,7 @@
         await sleep(500);
         await waitForNetIdle(1000, 5000);
 
-        // ★ v1.72: таймаут 12 с, ищем любой textarea (кроме поля "До" с текстом)
+        // v1.73: таймаут 12 с, ищем любой textarea (кроме поля "До" с текстом)
         const exists = await waitForCondition(() => {
           const s = findSolutionTextarea(getFormDoc(state.currentDesc));
           return s.r && isVisible(s.r.el);
@@ -1374,12 +1383,20 @@
       await sleep(300);
       await waitForNetIdle(1000, 5000);
 
+      // v1.73: передаем expectedText, чтобы найти именно поле с нашим текстом
       let verified = false;
       for (let v = 1; v <= 2; v++) {
-        const sV = findSolutionTextarea(getFormDoc(state.currentDesc));
-        if (sV.r && (sV.r.el.value || '') === d.longTextSolution) { verified = true; break; }
-        if (sV.r) { dbg(`    [E.2] verify ${v}: перезаписываю`); writeSolution(sV.r.el, d.longTextSolution); await waitForNetIdle(1000, 5000); }
-        else { dbg(`    [E.2] verify ${v}: поле пропало`); }
+        const sV = findSolutionTextarea(getFormDoc(state.currentDesc), d.longTextSolution);
+        if (sV.r) { verified = true; break; }
+        
+        dbg(`    [E.2] verify ${v}: поле с нашим текстом не найдено, перезаписываю`);
+        const fallback = findSolutionTextarea(getFormDoc(state.currentDesc));
+        if (fallback.r) {
+            writeSolution(fallback.r.el, d.longTextSolution);
+        } else {
+            dbg(`    [E.2] verify ${v}: поле для записи не найдено`);
+        }
+        await waitForNetIdle(1000, 5000);
         await sleep(300);
       }
       if (!verified) {
@@ -1428,24 +1445,21 @@
       // -------- C.2b: текст сохранился И edit mode активен --------
       await sleep(300);
       await waitForNetIdle(1000, 5000);
-      const sAfter = findSolutionTextarea(getFormDoc(state.currentDesc));
+      // v1.73: ищем именно поле с нашим текстом
+      const sAfter = findSolutionTextarea(getFormDoc(state.currentDesc), d.longTextSolution);
       const statusAfter = getCurrentStatusLabel();
 
       if (!sAfter.r) {
-        warnItem(`  ⚠ [C.2b pass ${passNo}] textarea не найдено`);
+        warnItem(`  ⚠ [C.2b pass ${passNo}] текст не найден (len != ${d.longTextSolution.length})`);
         return false;
       }
       if (statusAfter === null) {
         warnItem(`  ⚠ [C.2b pass ${passNo}] не в edit mode (status dropdown исчез)`);
         return false;
       }
-      const vAfter = sAfter.r.el.value || '';
-      if (vAfter === d.longTextSolution) {
-        log(`  ✔ [C.2b pass ${passNo}] текст сохранён, edit mode активен (status="${statusAfter}").`);
-        return true;
-      }
-      warnItem(`  ⚠ [C.2b pass ${passNo}] текст после «Обработать» = "${vAfter.slice(0,60).replace(/\n/g,'⏎')}" (длина ${vAfter.length}, ожидалось ${d.longTextSolution.length})`);
-      return false;
+      
+      log(`  ✔ [C.2b pass ${passNo}] текст сохранён, edit mode активен (status="${statusAfter}").`);
+      return true;
     }
 
     // ============ E.1 + E.2 + C.2 + C.2b (до 2 проходов) ============
